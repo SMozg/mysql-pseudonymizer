@@ -8,18 +8,31 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # ⛔ MYSQL_ROOT_PASSWORD ниже (везде в этом файле — "ci-throwaway-not-a-secret")
+    # — НЕ секрет, а обычное значение прямо в файле. Контейнер MySQL —
+    # одноразовый служебный стенд этого job'а: поднимается пустым из образа,
+    # живёт несколько минут ровно на время прогона и гибнет вместе с
+    # раннером; наружу (сетью, портом, диском вне job'а) он не смотрит.
+    # Секрет — то, что защищает доступ к чему-то, живущему дольше и вне этого
+    # job'а; здесь такого нет. Если пароль зависит от секрета репозитория, у
+    # форкнувшего (secrets.* всегда пуст для PR из форка и для клона без
+    # настроенных секретов) он превращается в пустую строку — контейнер с
+    # пустым root-паролем отказывается стартовать, заданий становится ноль,
+    # CI красный без единого запущенного шага (проверено прогоном
+    # 33900580801, total_count: 0). Обычное значение в файле снимает эту
+    # зависимость: одно и то же для любого клона или форка.
     services:
       mysql:
         image: mysql:8.0.43
         env:
-          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_ROOT_PASSWORD: ci-throwaway-not-a-secret
           MYSQL_DATABASE: sakila
         ports:
           - 3306:3306
         # healthcheck: ждём, пока сервер реально готов принимать соединения,
         # прежде чем идти дальше по job'у (GitHub Actions блокирует шаги до "healthy")
         options: >-
-          --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -p${{ secrets.MYSQL_ROOT_PASSWORD }}"
+          --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -pci-throwaway-not-a-secret"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=30
@@ -43,8 +56,8 @@ jobs:
       - name: Залить схему и данные Sakila
         run: |
           if [ -f demo/sakila/initdb/01-schema.sql ] && [ -f demo/sakila/initdb/02-data.sql ]; then
-            mysql -h127.0.0.1 -uroot -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" sakila < demo/sakila/initdb/01-schema.sql
-            mysql -h127.0.0.1 -uroot -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" sakila < demo/sakila/initdb/02-data.sql
+            mysql -h127.0.0.1 -uroot -p"ci-throwaway-not-a-secret" sakila < demo/sakila/initdb/01-schema.sql
+            mysql -h127.0.0.1 -uroot -p"ci-throwaway-not-a-secret" sakila < demo/sakila/initdb/02-data.sql
           else
             echo "::error::Схема и данные Sakila (demo/sakila/initdb/01-schema.sql, 02-data.sql) не найдены в репозитории. Тесты работают на живой базе — без них дальнейшие шаги бессмысленны. Добавьте эти файлы в репозиторий или смените источник загрузки, прежде чем полагаться на зелёный CI."
             exit 1
@@ -56,9 +69,13 @@ jobs:
       - name: Сгенерировать одноразовый SANIT_KEY для этого прогона
         run: echo "SANIT_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" >> "$GITHUB_ENV"
 
+      # ⛔ SANIT_MODEL_KEY здесь намеренно НЕТ: тесты не должны требовать
+      # платный ключ модели. Контрактный тест поставщика подменяет транспорт
+      # (litellm.completion) заглушкой и проверяет форму ответа без сети
+      # (tests/example/test_provider_contract.py); реальный вызов модели —
+      # вне тестового набора.
       - name: Прогнать тесты
         env:
           MYSQL_USER: root
-          MYSQL_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-          SANIT_MODEL_KEY: ${{ secrets.SANIT_MODEL_KEY }}
+          MYSQL_PASSWORD: ci-throwaway-not-a-secret
         run: pytest

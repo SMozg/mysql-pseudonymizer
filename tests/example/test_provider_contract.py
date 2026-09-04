@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import helpers as h
@@ -17,6 +19,28 @@ from sanitizer import providers as providers_mod
 from sanitizer.models import Batch, ProviderResponse, RequestItem
 
 pytestmark = [pytest.mark.db]
+
+
+class _FakeLiteLLMResponse(dict):
+    """Достаточно похожа на ответ ``litellm.completion``, чтобы пройти через
+    ``ModelProvider.supply`` без единой правки в боевом коде: субскрипт
+    ``["choices"][0]["message"]["content"]`` -- как у настоящего ответа
+    (``litellm`` тоже возвращает объект с и словарным, и атрибутным доступом),
+    и атрибут ``usage.total_tokens`` -- тоже.
+    """
+
+    def __init__(self, content: str, tokens: int = 7):
+        super().__init__(choices=[{"message": {"content": content}}])
+        self.usage = type("_Usage", (), {"total_tokens": tokens})()
+
+
+def _fake_litellm_completion(**kwargs):
+    """Заглушка ТРАНСПОРТА (не поставщика): один кандидат на строку индекса 0.
+
+    Пакет в этом тесте всегда несёт ровно один элемент с индексом ``0`` --
+    формат ответа тот же JSON, который ждёт ``ModelProvider._parse``.
+    """
+    return _FakeLiteLLMResponse(json.dumps({"0": ["Заглушка-Замена"]}))
 
 
 # --- подмена настройкой -----------------------------------------------------
@@ -30,7 +54,7 @@ def test_providers_are_chosen_by_configuration(config):
         assert built[cls].name == name or name in built[cls].name
 
 
-def test_every_provider_speaks_the_same_protocol(config):
+def test_every_provider_speaks_the_same_protocol(config, monkeypatch):
     """Боевые поставщики и двойник различимы только именем: одна форма supply().
 
     ⛔ Атрибутов мало -- callable(provider.supply) зеленеет и тогда, когда
@@ -39,7 +63,25 @@ def test_every_provider_speaks_the_same_protocol(config):
     сверяет ФОРМУ ответа: ProviderResponse с items из ResponseItem(key,
     new_value) и usage с полем calls. Значения не сравниваются -- у боевого
     поставщика и двойника они по построению разные, интерфейс должен совпасть.
+
+    ⛔ Сеть подменена, а не тест ослаблен. ``ModelProvider.supply`` (единственный
+    боевой поставщик, реально ходящий в сеть) вызывается ЦЕЛИКОМ, как есть --
+    подменён только ТРАНСПОРТ, ``litellm.completion``, заглушкой с заготовленным
+    ответом (``_fake_litellm_completion``). Разбор ответа, сборка
+    ``ProviderResponse``/``ResponseItem``/``Usage`` -- боевой код, не мок; если
+    ``supply()`` сломается (например, снова начнёт вечно бросать
+    ``NotImplementedError`` или молча проглатывать пустой ответ), тест покраснеет
+    так же, как раньше падал бы на живой сети -- проверено: временная порча
+    ``supply()`` (`raise NotImplementedError` первой строкой) красит именно этот
+    тест, остальные заглушку транспорта не используют и не задеты.
+    ``SANIT_MODEL_KEY`` -- заведомо ФИКТИВНОЕ значение только на время теста
+    (monkeypatch отменяет после), в сеть оно не уходит: до сети дело не доходит
+    вовсе, litellm.completion не настоящий.
     """
+    monkeypatch.setattr("litellm.completion", _fake_litellm_completion)
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+
     built = providers_mod.build(config)
     fake = fakes.FakeModelProvider()
     for provider in list(built.values()) + [fake]:
