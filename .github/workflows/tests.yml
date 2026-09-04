@@ -1,0 +1,64 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0.43
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE: sakila
+        ports:
+          - 3306:3306
+        # healthcheck: ждём, пока сервер реально готов принимать соединения,
+        # прежде чем идти дальше по job'у (GitHub Actions блокирует шаги до "healthy")
+        options: >-
+          --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -p${{ secrets.MYSQL_ROOT_PASSWORD }}"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+          --health-start-period=30s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установить пакет и зависимости (включая dev/pytest)
+        run: pip install -e ".[dev]"
+
+      # Схема и данные Sakila лежат в репозитории (demo/sakila/initdb/) — тот же каталог,
+      # который docker-compose монтирует в /docker-entrypoint-initdb.d при локальном подъёме
+      # стенда. Проверка ниже — сторож на случай, если файлы когда-нибудь оттуда уедут:
+      # без них дальнейшие шаги бессмысленны, лучше явная остановка с понятной причиной,
+      # чем тихо-зелёный прогон вникуда.
+      - name: Залить схему и данные Sakila
+        run: |
+          if [ -f demo/sakila/initdb/01-schema.sql ] && [ -f demo/sakila/initdb/02-data.sql ]; then
+            mysql -h127.0.0.1 -uroot -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" sakila < demo/sakila/initdb/01-schema.sql
+            mysql -h127.0.0.1 -uroot -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" sakila < demo/sakila/initdb/02-data.sql
+          else
+            echo "::error::Схема и данные Sakila (demo/sakila/initdb/01-schema.sql, 02-data.sql) не найдены в репозитории. Тесты работают на живой базе — без них дальнейшие шаги бессмысленны. Добавьте эти файлы в репозиторий или смените источник загрузки, прежде чем полагаться на зелёный CI."
+            exit 1
+          fi
+
+      # SANIT_KEY — ключ шифрования словаря замен. В CI не хранится как секрет:
+      # словарь здесь живёт только внутри одного прогона и тут же исчезает вместе
+      # с контейнером, поэтому ключ достаточно сгенерировать на ходу, случайным.
+      - name: Сгенерировать одноразовый SANIT_KEY для этого прогона
+        run: echo "SANIT_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" >> "$GITHUB_ENV"
+
+      - name: Прогнать тесты
+        env:
+          MYSQL_USER: root
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          SANIT_MODEL_KEY: ${{ secrets.SANIT_MODEL_KEY }}
+        run: pytest

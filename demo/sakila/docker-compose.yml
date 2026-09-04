@@ -1,0 +1,34 @@
+# Демо-стенд Sakila для инструмента санитизации.
+# Подъём:   docker compose -f <этот файл> up -d
+# Проверка: docker compose -f <этот файл> ps
+# Снос:     docker compose -f <этот файл> down -v
+services:
+  sakila-db:
+    image: mysql:8.0.43
+    container_name: sanitizer-sakila-mysql
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --local-infile=0
+    ports:
+      # только петля, наружу база не торчит
+      - "127.0.0.1:${MYSQL_HOST_PORT}:3306"
+    volumes:
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+      - sakila-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  sakila-data:

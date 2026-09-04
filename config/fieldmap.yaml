@@ -1,0 +1,382 @@
+# Карта полей санитайзера — вход блока В.
+#
+# Ядро — ТЕКСТОВЫЕ колонки (DATA_TYPE IN char/varchar/text/tinytext/mediumtext/longtext)
+# из всех 90 колонок 16 таблиц демо-базы (открытая Sakila). Полнота по ним: 23 колонки —
+# П:12, ПУБ:2, К:1, Н:8 (см. FieldMap.completeness — считает СТРОГО текстовые).
+# ⛔ Плюс 2 нетекстовые строки — geometry (`address.location`, КЗ-8) и blob
+# (`staff.picture`, К): карта полей — вход всего конвейера, не только тестов по
+# текстовым колонкам, и это единственное место, где живёт константа-заглушка BLOB
+# (см. КОНТРАКТ-ФОРМЫ §3, `constant`). Итого в `rules` — 25 строк.
+#
+# field_class:  П (персональные, заменяются) · ПУБ (общедоступные по роли, НЕ заменяются,
+#               обязателен непустой `ground`) · К (конфиденциальные, гасятся константой
+#               из поля `constant` — единственное место, где она живёт) · Н (нейтральные).
+# value_class:  КЗ-1…КЗ-8 — область, где одно и то же исходное значение получает одну и
+#               ту же замену; лимит внутри класса ОДИН для всех его колонок (самый узкий
+#               участник), а не ширина конкретной колонки.
+# length_limit: для П с value_class — лимит класса значений; для производных полей
+#               (пересобираются из уже заменённых имени/фамилии, своего класса значений
+#               не имеют) — собственная ширина колонки; для ПУБ/Н — не применяется (null).
+# null_policy:  везде `keep` — NULL и пустая строка остаются как есть, замена не создаёт
+#               данных там, где их не было.
+
+rules:
+
+  # --- actor: класс ПУБ (Р-51, Р-55, Р-56) --------------------------------
+  # Основание держим прямо в ground (ПУБ-1 блокирует прогон, если пусто/коротко).
+
+  - table: actor
+    column: first_name
+    field_class: ПУБ
+    value_class: null
+    strategy: "не заменяется — исходное значение сохраняется"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: >-
+      Персональные данные, но общедоступные по роли: состав фильма и имена актёров
+      публикует правообладатель в титрах и каталогах; замена не даёт защиты (фильмография
+      узнаваема) и делает базу ложной там, где факт проверяем снаружи (Р-51, Р-55, Р-56).
+    constant: null
+
+  - table: actor
+    column: last_name
+    field_class: ПУБ
+    value_class: null
+    strategy: "не заменяется — исходное значение сохраняется"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: >-
+      То же основание, что и у first_name той же строки: персональные данные, но
+      общедоступные по роли (Р-51, Р-55). Оставлено осознанно, с отдельной строкой
+      в отчёте приёмки, а не молча пропущено.
+    constant: null
+
+  # --- address: 4 текстовые колонки класса П, 1 класса Н -------------------
+
+  - table: address
+    column: address
+    field_class: П
+    value_class: КЗ-5
+    strategy: "словарь КЗ-5: почтовый адрес (улица, дом)"
+    length_limit: 50
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: address
+    column: address2
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — по данным поле пусто везде (599 '' + 4 NULL)"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: null
+
+  - table: address
+    column: district
+    field_class: П
+    value_class: КЗ-4
+    strategy: "словарь КЗ-4: район; поле уже на лимите — 10 строк ровно по 20 символов"
+    length_limit: 20
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: address
+    column: postal_code
+    field_class: П
+    value_class: КЗ-6
+    strategy: "словарь КЗ-6: почтовый индекс, только цифры, длина исходной строки"
+    length_limit: 10
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: null
+
+  - table: address
+    column: phone
+    field_class: П
+    value_class: КЗ-7
+    strategy: "словарь КЗ-7: телефон, формат замены задан длиной исходного значения"
+    length_limit: 20
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: null
+
+  # --- category: справочник жанров, не ПД -----------------------------------
+
+  - table: category
+    column: name
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — справочник жанров, не персональные данные"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  # --- city / country: квазиидентификатор и ось географической аналитики ---
+
+  - table: city
+    column: city
+    field_class: П
+    value_class: КЗ-3
+    strategy: "словарь КЗ-3: город той же страны; London (2 разных city_id) — разные замены"
+    length_limit: 50
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: country
+    column: country
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — ось географической аналитики (sales_by_store), согласовано"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  # --- customer: имя/фамилия из словаря, email пересобирается --------------
+
+  - table: customer
+    column: first_name
+    field_class: П
+    value_class: КЗ-1
+    strategy: "словарь КЗ-1: личное имя; делит класс с staff.first_name"
+    length_limit: 16
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: null
+    constant: null
+
+  - table: customer
+    column: last_name
+    field_class: П
+    value_class: КЗ-2
+    strategy: "словарь КЗ-2: фамилия; делит класс с staff.last_name, отдельно от КЗ-1"
+    length_limit: 14
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: null
+    constant: null
+
+  - table: customer
+    column: email
+    field_class: П
+    value_class: null
+    strategy: >-
+      производное: UPPER(имя).UPPER(фамилия)@sakilacustomer.org из уже выданных
+      замен КЗ-1/КЗ-2; своего класса значений нет (Р-38)
+    length_limit: 50
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: null
+    constant: null
+
+  # --- film / film_text: вымысел, не ПД; film_text — теневая копия ---------
+
+  - table: film
+    column: title
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — вымысел, не персональные данные; служит тестом синхронности"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: null
+    constant: null
+
+  - table: film
+    column: description
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — вымысел, не персональные данные"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: film_text
+    column: title
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — теневая копия film.title, синхронизирована триггерами"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: UPPER
+    ground: null
+    constant: null
+
+  - table: film_text
+    column: description
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — теневая копия film.description, синхронизирована триггерами"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  # --- language: справочник языков, не ПД -----------------------------------
+
+  - table: language
+    column: name
+    field_class: Н
+    value_class: null
+    strategy: "не заменяется — справочник языков, не персональные данные"
+    length_limit: null
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  # --- staff: имя/фамилия из общего словаря с customer; email/username -----
+  # производные; password — единственная текстовая колонка класса К.
+
+  - table: staff
+    column: first_name
+    field_class: П
+    value_class: КЗ-1
+    strategy: "словарь КЗ-1: личное имя; делит класс с customer.first_name"
+    length_limit: 16
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: staff
+    column: last_name
+    field_class: П
+    value_class: КЗ-2
+    strategy: "словарь КЗ-2: фамилия; делит класс с customer.last_name"
+    length_limit: 14
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: staff
+    column: email
+    field_class: П
+    value_class: null
+    strategy: >-
+      производное: Имя.Фамилия@sakilastaff.com из уже выданной замены КЗ-1/КЗ-2,
+      регистр как в имени; своего класса значений нет (Р-38)
+    length_limit: 50
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: staff
+    column: username
+    field_class: П
+    value_class: null
+    strategy: "производное: логин = уже выданная замена first_name (КЗ-1); своего класса нет"
+    length_limit: 16
+    null_policy: keep
+    collation: utf8mb4_0900_ai_ci
+    auto_update: false
+    case_convention: MIXED
+    ground: null
+    constant: null
+
+  - table: staff
+    column: password
+    field_class: К
+    value_class: null
+    strategy: "константа: SHA1 пароля-заглушки на всё поле; NULL остаётся NULL"
+    length_limit: 40
+    null_policy: keep
+    collation: utf8mb4_bin
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: "8d5879ed3d8d10b9a89ba983f8f7a1a75bd61f11"
+
+  # --- нетекстовые колонки с классом П/К: карта полей — вход всего конвейера, ---
+  # --- не только тестов по текстовым колонкам (см. Completeness.all_columns) ---
+
+  - table: address
+    column: location
+    field_class: П
+    value_class: КЗ-8
+    strategy: >-
+      арифметический сдвиг внутри страновой рамки; из 460 различных точек одна —
+      POINT(0 0) в 144 строках, это плейсхолдер, сдвигу не подлежит; настоящих
+      точек 459, каждая сдвигается по своей стране
+    length_limit: null
+    null_policy: keep
+    collation: null
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: null
+
+  - table: staff
+    column: picture
+    field_class: К
+    value_class: null
+    strategy: "константа-заглушка BLOB на всё поле; NULL остаётся NULL"
+    length_limit: 65535
+    null_policy: keep
+    collation: null
+    auto_update: false
+    case_convention: ASIS
+    ground: null
+    constant: "base64:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="

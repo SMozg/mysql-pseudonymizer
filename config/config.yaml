@@ -1,0 +1,51 @@
+# Боевой конфиг санитайзера -- по нему завтра идёт настоящий прогон на демо-стенде
+# Sakila (см. README, demo/sakila). ⛔ Секретов здесь нет ни одного: пароль стенда
+# (MYSQL_USER/MYSQL_PASSWORD/MYSQL_ROOT_PASSWORD), ключ словаря (SANIT_KEY) и ключ
+# модели (SANIT_MODEL_KEY) читаются ТОЛЬКО из окружения (см. demo/sakila/.env и
+# корневой .env, шаблон -- .env.example).
+
+stand:
+  host: 127.0.0.1
+  port: 3307                 # demo/sakila/.env.example: MYSQL_HOST_PORT
+  user: sakila_app            # demo/sakila/.env.example: MYSQL_USER (не root)
+  source_schema: sakila        # ⛔ только чтение, критерий 22 стережёт неизменность
+  work_schema: sanit_work      # рабочая копия -- её чистит прогон
+  ref_schema: sanit_ref        # снимок «ДО», эталон сравнений
+  restored_schema: sanit_restored   # приёмник обратного прогона (критерий 28)
+
+run:
+  # ⛔ Значения ниже, где контракт молчал, выбраны мной осознанно -- см. отчёт волны:
+  seed: 20260903               # дата снятия эталонных чисел (tests/helpers/reference.py) --
+                                # тот же seed, под который проверены все контрольные числа
+  batch_size: 50                # проверенное значение: даёт 57 вызовов вместо 2771 (критерий 24)
+  retry_limit: 3                 # ⛔ контракт: 3 повтора = 4 попытки на значение
+  refusal_ratio: 0.05            # ⛔ контракт: потолок отказов 5 % от принятых (138 при 2771)
+  country_frame_margin: 0.05     # запас страновой рамки координаты (КЗ-8), в градусах
+  declaration: base              # ⛔ первый прогон на свежей копии -- "база исходная";
+                                  # на продолжении после обрыва сменить на continue руками
+  model_name: gemini-3.8-flash   # быстрая дешёвая модель; ⛔ имя любое, поставщик
+                                 # задаётся адресом шлюза в SANIT_MODEL_BASE_URL (окружение);
+                                # имя может быть любым, включая модели других поставщиков --
+                                # см. SANIT_MODEL_BASE_URL в .env.example / README.md
+
+providers:
+  # ⛔ Р-81: живая модель -- только имя/фамилия/город; район и адрес -- генератор;
+  # индекс/телефон/координата -- нетекстовый поставщик (сети не требует).
+  "КЗ-1": model
+  "КЗ-2": model
+  "КЗ-3": model
+  "КЗ-4": generator
+  "КЗ-5": generator
+  "КЗ-6": nontext
+  "КЗ-7": nontext
+  "КЗ-8": nontext
+
+paths:
+  fieldmap: config/fieldmap.yaml
+  # ⛔ Ниже -- ВНЕ репозитория по построению: .gitignore отсекает *.enc, runs/,
+  # runlog/, report/ как деанонимизаторы (словарь) и как местные артефакты прогона.
+  dictionary: runs/dict.enc
+  runlog: runlog/run.runlog
+  report: report/ОТЧЕТ-ПРИЕМКИ.md
+  snapshot_before: runs/snapshot_before.json
+  snapshot_after: runs/snapshot_after.json
