@@ -13,6 +13,16 @@ through an encrypted dictionary.
 
 By Sergey Moskalev, [@SergeiMoskalevV](https://t.me/SergeiMoskalevV).
 
+## Why you would need it
+
+- **Hand the database to an outsider.** A contractor, an outsourcing team, an external audit, a
+  demo: the database leaves with its real structure and volume, minus the personal data.
+- **Develop and test on real data.** Not on ten invented rows but on the real distribution: the
+  same relations, the same cardinality, the same skews — the very things that break code which
+  went green on synthetic fixtures.
+- **Bring external work back into production.** A contractor's edits unfold back into the original
+  values through the dictionary; a blanked-out `xxxxx` never unfolds — that is what reversibility is for.
+
 ## What it does to real rows
 
 Sakila demo database, actual run output. **Bold** marks what changed; the rest is byte for byte.
