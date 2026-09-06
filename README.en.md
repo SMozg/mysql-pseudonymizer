@@ -101,6 +101,9 @@ python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
 python -m sanitizer verify  --config config/config.yaml
+#   verify --twin additionally performs a PAIRED run (two runs with one seed on
+#      fresh copies, each with its own dictionary) and measures repeatability —
+#      criterion 21. That is two real runs: time and model calls.
 python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 ```
 

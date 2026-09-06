@@ -99,6 +99,9 @@ python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
 python -m sanitizer verify  --config config/config.yaml
+#   ⛔ verify --twin дополнительно проводит ПАРНЫЙ прогон (два прогона с одним
+#      seed на свежих копиях, у каждого свой словарь) и меряет повторяемость —
+#      критерий 21. Это два настоящих прогона: время и вызовы модели.
 python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 ```
 
