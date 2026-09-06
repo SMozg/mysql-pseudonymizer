@@ -271,3 +271,80 @@ def test_gateway_that_rejects_seed_does_not_break_the_run(monkeypatch, config, c
     seen.clear()
     provider.supply(batch)
     assert seen == [False], f"параметр пробовался повторно: {seen}"
+
+
+def test_transient_gateway_failure_does_not_lose_the_run(monkeypatch, config, capsys):
+    """📌 Случайный отказ сети не должен стоить восьми минут работы.
+
+    Замерено 06.09 на живом прогоне: один 503 на первом из 57 пакетов убил весь
+    прогон. Отказ ТРАНСПОРТА -- не отказ модели: тот же запрос через несколько
+    секунд проходит. Громкая остановка обязана наступать ПОСЛЕ исчерпания
+    повторов, а не на первом сбое.
+
+    📌 Повтор транспорта не путать с повтором замены (`retry_limit`): там модель
+    ответила и ответ отклонён фильтром, здесь ответа не было вовсе.
+    """
+    from sanitizer.providers import model as model_mod
+
+    class ServiceUnavailableError(Exception):
+        """Имя типа значимо: политика повторов смотрит на ТИП, не на текст."""
+
+    calls = []
+
+    def _flaky(**kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ServiceUnavailableError("503")
+        return _FakeLiteLLMResponse(json.dumps({"0": ["Заглушка-Замена"]}))
+
+    monkeypatch.setattr("litellm.completion", _flaky)
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+    monkeypatch.setattr(model_mod, "_SEED_ACCEPTED", {})
+    # 📌 паузы обнулены: тест проверяет ПОЛИТИКУ, а не умение ждать
+    monkeypatch.setattr(model_mod, "_TRANSPORT_BACKOFF", (0, 0, 0))
+
+    provider = model_mod.ModelProvider(config)
+    cls = next(iter(provider.handles))
+    item = RequestItem(key=("probe_table", (1,), "probe_column"), attempt=0, value_class=cls,
+                       old_value="Probe Original Value",
+                       length_limit=R.CLASS_LIMITS.get(cls), fmt={})
+    batch = Batch(value_class=cls, items=(item,), taken=frozenset(), seed=1)
+
+    response = provider.supply(batch)
+
+    assert isinstance(response, ProviderResponse) and response.items
+    assert len(calls) == 3, f"ожидали два повтора и успех на третьем; вызовов {len(calls)}"
+    assert "недоступен" in capsys.readouterr().err, "ожидание не названо вслух"
+
+
+def test_permanent_gateway_failure_still_stops_loudly(monkeypatch, config):
+    """📌 Повторы не превращают настоящий отказ в тишину: он всё равно громкий.
+
+    Проверка симметрична предыдущей: политика повторов обязана НЕ съедать отказ,
+    который повторами не лечится. Иначе прогон встанет молча и без причины.
+    """
+    from sanitizer.providers import model as model_mod
+    from sanitizer.errors import NetworkUnavailable
+
+    class ServiceUnavailableError(Exception):
+        pass
+
+    def _always_down(**kwargs):
+        raise ServiceUnavailableError("503")
+
+    monkeypatch.setattr("litellm.completion", _always_down)
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+    monkeypatch.setattr(model_mod, "_SEED_ACCEPTED", {})
+    monkeypatch.setattr(model_mod, "_TRANSPORT_BACKOFF", (0, 0, 0))
+
+    provider = model_mod.ModelProvider(config)
+    cls = next(iter(provider.handles))
+    item = RequestItem(key=("probe_table", (1,), "probe_column"), attempt=0, value_class=cls,
+                       old_value="Probe Original Value",
+                       length_limit=R.CLASS_LIMITS.get(cls), fmt={})
+    batch = Batch(value_class=cls, items=(item,), taken=frozenset(), seed=1)
+
+    with pytest.raises(NetworkUnavailable):
+        provider.supply(batch)

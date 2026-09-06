@@ -53,6 +53,7 @@ import json
 import hashlib
 import os
 import sys
+import time
 
 from ..errors import NetworkUnavailable
 from ..models import ProviderResponse, ResponseItem, Usage
@@ -69,6 +70,49 @@ _SEED_ACCEPTED: dict = {}
 #: Слова, которыми поставщики отказывают ИМЕННО в параметре, а не в доступе.
 _UNKNOWN_PARAM_MARKS = ("unknown name", "unrecognized", "unsupported", "cannot find field",
                         "not supported", "unexpected keyword")
+
+
+#: Сколько раз повторить вызов при отказе ТРАНСПОРТА и с какими паузами.
+#: ⛔ Замерено 06.09 на живом прогоне: один случайный 503 на первом же из 57 пакетов
+#: убил весь прогон. Отказ транспорта -- не отказ модели: тот же запрос через
+#: несколько секунд проходит, и терять из-за него восемь минут работы неправильно.
+#: ⛔ Повтор транспорта НЕ путать с повтором замены (`retry_limit`, контракт): там
+#: модель ответила и ответ отклонён фильтром, здесь ответа не было вовсе.
+_TRANSPORT_BACKOFF = (3, 8, 20)
+
+#: Типы отказов, которые лечатся ожиданием. ⛔ Именно ТИПЫ: текст исключения у
+#: litellm умеет нести заголовок или адрес с ключом и здесь не читается.
+_TRANSPORT_ERRORS = frozenset({
+    "ServiceUnavailableError", "RateLimitError", "Timeout", "APITimeoutError",
+    "APIConnectionError", "InternalServerError", "APIError",
+})
+
+
+def _is_transport(exc) -> bool:
+    """Отказ ли это транспорта -- то есть лечится ли он ожиданием."""
+    return type(exc).__name__ in _TRANSPORT_ERRORS
+
+
+def _complete(kwargs):
+    """Вызов модели с повторами по отказам транспорта.
+
+    ⛔ Громкая остановка наступает ПОСЛЕ исчерпания повторов, а не на первом
+    сбое сети: иначе прогон длиной в восемь минут теряется от одной секунды
+    чужой недоступности. Что произошло -- говорится вслух, чтобы задержка
+    прогона не выглядела зависанием.
+    """
+    import litellm
+
+    for attempt, pause in enumerate(_TRANSPORT_BACKOFF, start=1):
+        try:
+            return litellm.completion(**kwargs)
+        except Exception as exc:
+            if not _is_transport(exc):
+                raise
+            print(f"поставщик недоступен ({type(exc).__name__}), попытка {attempt} из "
+                  f"{len(_TRANSPORT_BACKOFF) + 1}, пауза {pause} с", file=sys.stderr)
+            time.sleep(pause)
+    return litellm.completion(**kwargs)
 
 
 def _rejects_seed(exc) -> bool:
@@ -152,7 +196,7 @@ class ModelProvider:
             call_kwargs["seed"] = _call_seed(batch)
 
         try:
-            response = litellm.completion(**call_kwargs)
+            response = _complete(call_kwargs)
         except Exception as exc:
             # ⛔ Возможности шлюза ВЫЯСНЯЮТСЯ, а не предполагаются: отказ именно
             # по `seed` снимает параметр на весь процесс и повторяет вызов один
@@ -171,7 +215,7 @@ class ModelProvider:
             print("поставщик не принимает параметр seed: повторяемость прогона "
                   "держится только на temperature=0", file=sys.stderr)
             try:
-                response = litellm.completion(**call_kwargs)
+                response = _complete(call_kwargs)
             except Exception as exc2:
                 raise NetworkUnavailable(
                     f"поставщик (модель) недоступен по сети: {type(exc2).__name__}"
