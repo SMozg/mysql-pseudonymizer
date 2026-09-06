@@ -8,13 +8,52 @@
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Optional
 
 import yaml
 
+from .errors import GateFailed
 from .models import Dsn
+
+#: ``${ИМЯ}`` в тексте конфига -- подстановка из окружения.
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env(text: str, *, path) -> str:
+    """Подставить ``${ИМЯ}`` из окружения. ⛔ Отсутствует -- громко, а не пусто.
+
+    ⛔ ЗАЧЕМ. Порт стенда и имя пользователя раньше стояли числом и словом в
+    двух местах сразу -- в `demo/sakila/.env` (его читает docker compose) и в
+    `config/config.yaml` (его читает санитайзер). Кто менял занятый порт в
+    одном файле, получал отказ соединения из другого: рассинхрон двух копий
+    одного значения, ровно тот дефект, который этот проект ловит у других.
+    Значение теперь ОДНО, в окружении; конфиг на него ссылается.
+    ⛔ Пустая подстановка запрещена: неизвестная переменная -- предпусковой
+    гейт (код 3) с ИМЕНЕМ переменной, никогда со значением.
+    """
+    missing = []
+
+    def _sub(m):
+        name = m.group(1)
+        value = os.environ.get(name)
+        if value is None or value == "":
+            missing.append(name)
+            return ""
+        return value
+
+    result = _ENV_REF.sub(_sub, text)
+    if missing:
+        names = ", ".join(sorted(set(missing)))
+        raise GateFailed(
+            f"конфиг {path} ссылается на переменные окружения, которых нет: {names}. "
+            f"Заполните .env (шаблон -- .env.example, demo/sakila/.env.example) "
+            f"или задайте их через export."
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -77,7 +116,8 @@ class Config:
     @classmethod
     def load(cls, path) -> "Config":
         path = Path(path)
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = _expand_env(path.read_text(encoding="utf-8"), path=path)
+        data = yaml.safe_load(text) or {}
         stand = StandConfig(**data["stand"])
         run = RunConfig(**data["run"])
         providers = dict(data.get("providers", {}))

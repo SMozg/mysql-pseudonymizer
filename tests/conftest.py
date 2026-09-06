@@ -24,6 +24,7 @@ import yaml
 from sanitizer import db, providers as providers_mod
 from sanitizer.config import Config
 from sanitizer.dictionary import Dictionary
+from sanitizer.envfile import load_env_files
 from sanitizer.fieldmap import FieldMap
 from sanitizer.metrics import collision_baseline, take_snapshot
 from sanitizer.models import RunRule
@@ -35,7 +36,11 @@ from helpers import fakes, sanit
 from helpers import reference as ref
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STAND_ENV = REPO_ROOT.parent / "sakila" / ".env"
+#: ⛔ Файлы окружения ищутся ВНУТРИ репозитория и только там. Раньше здесь стоял
+#: `REPO_ROOT.parent / "sakila" / ".env"` -- путь из рабочего дерева автора: в
+#: чужом клоне такого каталога нет вовсе, переменные не подтягивались, и вся
+#: сессия молча уходила в skip. Тот же класс ложной зелени, что и CI без порта.
+STAND_ENV_FILES = (Path(".env"), Path("demo") / "sakila" / ".env")
 
 SOURCE_SCHEMA = ref.BASE_SCHEMA          # sakila, только чтение
 REF_SCHEMA = "sanit_ref"                 # снимок «ДО»
@@ -55,23 +60,14 @@ def pytest_configure(config):
 
 
 def _load_stand_env() -> None:
-    """Подтянуть параметры стенда из .env, если их нет в окружении.
+    """Подтянуть параметры стенда из `.env` тем же кодом, что и боевой CLI.
 
-    ⛔ Значения не логируются и не возвращаются наружу: файл читается,
-    переменные ставятся, и на этом всё.
+    ⛔ Тот же модуль (`sanitizer.envfile`), что зовёт `cli.main()`: если тесты
+    читают окружение своим способом, они проверяют не ту сборку, которую
+    получает пользователь. Уже заданная снаружи переменная сильнее файла.
+    ⛔ Значения не логируются и не возвращаются наружу.
     """
-    if os.environ.get("MYSQL_USER") and (
-        os.environ.get("MYSQL_PASSWORD") or os.environ.get("MYSQL_ROOT_PASSWORD")
-    ):
-        return
-    if not STAND_ENV.exists():
-        return
-    for line in STAND_ENV.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, _, value = line.partition("=")
-        os.environ.setdefault(name.strip(), value.strip())
+    load_env_files(STAND_ENV_FILES, base=REPO_ROOT)
 
 
 @pytest.fixture(scope="session", autouse=True)

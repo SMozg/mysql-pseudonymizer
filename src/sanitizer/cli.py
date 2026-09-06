@@ -35,6 +35,7 @@ from typing import Sequence
 
 from . import db, stand
 from .config import Config
+from .envfile import load_env_files
 from .dictionary import Dictionary
 from .errors import GateFailed, HardStop, IncompleteFieldMap, StandNotStrict
 from .fieldmap import FieldMap
@@ -265,6 +266,14 @@ def _report(cfg: Config, *, want_pdf: bool) -> int:
 def main(argv: Sequence[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv))
+
+    # ⛔ Пароль стенда и ключи читаются ИЗ ОКРУЖЕНИЯ -- правило не меняется.
+    # Здесь окружение лишь ДОПОЛНЯЕТСЯ тем, что пользователь уже положил в
+    # `.env` по инструкции README: без этого шага `demo/sakila/.env` читал
+    # только docker compose, а санитайзер шёл в базу с пустым паролем.
+    # ⛔ Наружу уходят ИМЕНА переменных, никогда значения.
+    for path, names in load_env_files().items():
+        print(f"прочитан {path}: {', '.join(sorted(names))}", file=sys.stderr)
 
     try:
         cfg = Config.load(args.config)

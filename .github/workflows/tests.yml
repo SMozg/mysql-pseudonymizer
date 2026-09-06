@@ -66,16 +66,31 @@ jobs:
       # SANIT_KEY — ключ шифрования словаря замен. В CI не хранится как секрет:
       # словарь здесь живёт только внутри одного прогона и тут же исчезает вместе
       # с контейнером, поэтому ключ достаточно сгенерировать на ходу, случайным.
+      # ⛔ token_HEX, не token_urlsafe: ключ читается через `bytes.fromhex`
+      # (`runner.read_sanit_key`), и urlsafe-строка ломала бы прогон
+      # `MissingSecretKey`. Дефект жил незамеченным ровно потому, что CI не
+      # выполнял ни одного теста -- см. .github/ci_gate.py.
       - name: Сгенерировать одноразовый SANIT_KEY для этого прогона
-        run: echo "SANIT_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" >> "$GITHUB_ENV"
+        run: echo "SANIT_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
 
       # ⛔ SANIT_MODEL_KEY здесь намеренно НЕТ: тесты не должны требовать
       # платный ключ модели. Контрактный тест поставщика подменяет транспорт
       # (litellm.completion) заглушкой и проверяет форму ответа без сети
       # (tests/example/test_provider_contract.py); реальный вызов модели —
       # вне тестового набора.
+      # ⛔ MYSQL_HOST_PORT здесь обязателен. Без него сессионная фикстура стенда
+      # звала `pytest.skip`, весь набор уходил в "156 skipped", а код возврата
+      # оставался нулевым -- зелёный бейдж над непроведённой проверкой.
+      # Порт сервиса MySQL в job'е -- 3306 (см. `services.mysql.ports` выше).
       - name: Прогнать тесты
         env:
           MYSQL_USER: root
           MYSQL_PASSWORD: ci-throwaway-not-a-secret
-        run: pytest
+          MYSQL_HOST_PORT: 3306
+        run: pytest --junitxml=junit.xml
+
+      # ⛔ Гейт меряет РЕЗУЛЬТАТ прогона, а не то, что шаг выше завершился.
+      # `if: always()` -- сторож обязан высказаться и после падения тестов.
+      - name: "Сторож: выполнено 0 тестов = падение"
+        if: always()
+        run: python .github/ci_gate.py junit.xml

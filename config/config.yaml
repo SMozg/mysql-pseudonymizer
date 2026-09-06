@@ -6,8 +6,11 @@
 
 stand:
   host: 127.0.0.1
-  port: 3307                 # demo/sakila/.env.example: MYSQL_HOST_PORT
-  user: sakila_app            # demo/sakila/.env.example: MYSQL_USER (не root)
+  # ⛔ Порт и пользователь берутся ИЗ ОКРУЖЕНИЯ (demo/sakila/.env, оно же читается
+  # docker compose при подъёме стенда): одно значение, один источник. Занят 3307 --
+  # правится ОДНА строка в .env, конфиг не трогается. Пустая переменная -- гейт (код 3).
+  port: ${MYSQL_HOST_PORT}
+  user: ${MYSQL_USER}
   source_schema: sakila        # ⛔ только чтение, критерий 22 стережёт неизменность
   work_schema: sanit_work      # рабочая копия -- её чистит прогон
   ref_schema: sanit_ref        # снимок «ДО», эталон сравнений

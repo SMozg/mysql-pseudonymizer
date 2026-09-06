@@ -72,22 +72,42 @@
 
 ## Быстрый старт
 
+Все команды — **из корня репозитория**: оттуда читаются `.env` и `config/`.
+
 ```bash
 git clone https://github.com/SMozg/mysql-pseudonymizer.git
 cd mysql-pseudonymizer
 pip install -e ".[dev]"
 
-# демо-стенд: данные Sakila лежат в репозитории
-cd demo/sakila && cp .env.example .env    # заполнить пароли
-docker compose up -d && docker compose ps # дождаться healthy
-cd ../..
+# 1. демо-стенд. Данные Sakila лежат в репозитории, качать нечего.
+cp demo/sakila/.env.example demo/sakila/.env    # задать MYSQL_ROOT_PASSWORD и MYSQL_PASSWORD
+docker compose -f demo/sakila/docker-compose.yml up -d
+docker compose -f demo/sakila/docker-compose.yml ps    # дождаться healthy
 
-export SANIT_KEY=...   # ключ словаря, шаблон — .env.example
+# 2. ключи инструмента — в корневой .env (в git не попадает)
+cp .env.example .env
+python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
+#   ⛔ SANIT_KEY — шестнадцатеричная строка, ею шифруется словарь замен.
+#   ⛔ SANIT_MODEL_KEY — туда же: без него не заменить имена, фамилии и города
+#      (классы КЗ-1…КЗ-3 идут через модель). SANIT_MODEL_BASE_URL — если модель
+#      за OpenAI-совместимым шлюзом.
+
+# 3. прогон
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
 python -m sanitizer verify  --config config/config.yaml
 python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 ```
+
+Пароль стенда и ключи санитайзер читает **из окружения**; `.env` в него только
+подставляется, и уже заданная снаружи переменная сильнее файла. Порт и пользователь
+живут одной строкой в `demo/sakila/.env` — их же берёт и docker compose, и конфиг
+(`${MYSQL_HOST_PORT}`, `${MYSQL_USER}`): порт 3307 занят — правится одно место.
+Незаполненная переменная останавливает прогон предпусковым гейтом с её именем,
+а не отказом соединения без причины.
+
+Тесты — тем же стендом: `pytest` (156 тестов, около 16 минут — они гоняют
+настоящие прогоны на копиях базы, а не заглушки).
 
 `config/config.yaml` — под демо-стенд; для своей базы `config/config.example.yaml` и `fieldmap.yaml`.
 `--declare continue` идёт по готовому словарю. Коды возврата: **0** приёмка без провалов ·
