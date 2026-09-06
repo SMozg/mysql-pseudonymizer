@@ -219,7 +219,7 @@ def test_c26_a_merged_replacement_still_reverses_to_its_own_original(
         pytest.skip("прогон не дал ни одной склейки -- проверять нечего")
     for g in glued[:20]:
         records = h.rows(conn, h.q(
-            "SELECT tbl, pk, col, old_val FROM {sanit}.dict "
+            "SELECT entity_table, entity_pk, col, old_val FROM {sanit}.dict "
             "WHERE cls=%s AND new_val COLLATE utf8mb4_0900_ai_ci = %s",
             cur=cur, sanit=sanit_schema), (g["cls"], g["new_val"]))
         assert len(records) >= g["n"], (
