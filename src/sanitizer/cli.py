@@ -39,7 +39,7 @@ from .envfile import load_env_files
 from .dictionary import Dictionary
 from .errors import GateFailed, HardStop, IncompleteFieldMap, StandNotStrict
 from .fieldmap import FieldMap
-from .metrics import collision_baseline, take_snapshot
+from .metrics import collision_baseline, table_hashes, take_snapshot
 from .models import RunRule, Snapshot
 from .runner import Runner, _RunLog, read_sanit_key
 from .verifier import Verifier
@@ -68,6 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--config", required=True)
+    # ⛔ Критерий 21 (повторяемость) измеряется ТОЛЬКО парным прогоном: два
+    # Runner с одним seed на свежих копиях, у каждого свой словарь. Флаг
+    # отдельный, потому что это два настоящих прогона -- время и вызовы модели.
+    # Без флага критерий остаётся F с честным текстом «не измерялось» (Р-72).
+    p_verify.add_argument("--twin", action="store_true",
+                          help="провести парный прогон и измерить критерий 21")
 
     p_reverse = sub.add_parser("reverse")
     p_reverse.add_argument("--config", required=True)
@@ -197,7 +203,7 @@ def _prepare(cfg: Config) -> int:
 # --- verify/reverse/report: собрать Verifier отдельным процессом ------------
 
 
-def _build_verifier(cfg: Config) -> Verifier:
+def _build_verifier(cfg: Config, *, twin_runs=None) -> Verifier:
     field_map = FieldMap.load(cfg.paths.fieldmap)
     passp = stand.passport(cfg)
     snapshot = _load_snapshot(cfg.paths.snapshot_before)
@@ -223,11 +229,75 @@ def _build_verifier(cfg: Config) -> Verifier:
     # тот же `country_frame_margin`, каким пользуется `run` (см. `RunRule` выше в
     # `main()`), а не отдельное число.
     return Verifier(passp, snapshot, baseline, field_map, dictionary, runlog,
+                     twin_runs=twin_runs,
                      country_frame_margin=cfg.run.country_frame_margin)
 
 
-def _verify(cfg: Config) -> int:
-    verifier = _build_verifier(cfg)
+#: Метки двух прогонов пары. ⛔ Ровно два: критерий 21 сравнивает A с B.
+_TWIN_TAGS = ("a", "b")
+
+
+def _twin_config(cfg: Config, tag: str) -> Config:
+    """Config пары с ПОЛНОСТЬЮ своим набором имён -- схема и все артефакты.
+
+    ⛔ Отдельный словарь у каждого прогона -- не аккуратность, а суть замера.
+    Общий файл означает, что второй прогон не воспроизводит замену по seed, а
+    видит «уже применено» и переиспользует запись первого: хеши сойдутся не
+    потому, что прогон повторим, а потому, что это буквально одна и та же
+    запись. Проверка тогда не доказывает ничего.
+    """
+    workdir = cfg.paths.dictionary.parent
+    return cfg.with_overrides(
+        work_schema=f"{cfg.stand.work_schema}_twin_{tag}",
+        dictionary=workdir / f"twin_{tag}.enc",
+        runlog=workdir / f"twin_{tag}.runlog",
+        report=workdir / f"twin_{tag}.md",
+        snapshot_before=workdir / f"twin_{tag}_before.json",
+        snapshot_after=workdir / f"twin_{tag}_after.json",
+    )
+
+
+def _twin_runs(cfg: Config) -> tuple:
+    """Два прогона с ОДНИМ seed на свежих копиях -> пара сводов «таблица -> хеш».
+
+    ⛔ Копии и файлы сносятся в `finally` при любом исходе: замер не оставляет
+    за собой ни схем на сервере, ни словарей на диске -- второй словарь той же
+    базы это ещё один деанонимизатор.
+    """
+    conn = db.connect(cfg.stand.dsn(schema=None))
+    stand.session_init(conn)
+    made = []
+    hashes = []
+    try:
+        for tag in _TWIN_TAGS:
+            twin = _twin_config(cfg, tag)
+            schema = twin.stand.work_schema
+            made.append(twin)
+            print(f"парный прогон {tag}: копия {schema}", file=sys.stderr)
+            stand.make_copy(cfg.stand.source_schema, schema, conn=conn)
+            rule = RunRule(
+                seed=cfg.run.seed,
+                batch_size=cfg.run.batch_size,
+                retry_limit=cfg.run.retry_limit,
+                refusal_ratio=cfg.run.refusal_ratio,
+                country_frame_margin=cfg.run.country_frame_margin,
+                declaration="base",
+            )
+            Runner(rule, twin).run()
+            hashes.append(table_hashes(conn, schema))
+    finally:
+        for twin in made:
+            db.execute(conn, f"DROP DATABASE IF EXISTS `{twin.stand.work_schema}`")
+            for stray in (twin.paths.dictionary, twin.paths.runlog, twin.paths.report,
+                          twin.paths.snapshot_before, twin.paths.snapshot_after):
+                Path(stray).unlink(missing_ok=True)
+        conn.close()
+    return tuple(hashes)
+
+
+def _verify(cfg: Config, *, twin: bool = False) -> int:
+    pair = _twin_runs(cfg) if twin else None
+    verifier = _build_verifier(cfg, twin_runs=pair)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
     return EXIT_OK if report.green else EXIT_RED_ACCEPTANCE
@@ -279,9 +349,21 @@ def main(argv: Sequence[str]) -> int:
         cfg = Config.load(args.config)
 
         if args.command == "run":
+            # ⛔ Правка командной строки едет В КОНФИГ, а не мимо него. Поставщик
+            # замен строится из `cfg` и берёт seed оттуда (`providers.build`):
+            # пока `--seed` жил только в `RunRule`, модель работала с одним
+            # seed, а раннер отчитывался о другом -- повторяемость мерилась бы
+            # по числу, которого никто не применял.
+            overrides = {}
+            if args.seed is not None:
+                overrides["seed"] = args.seed
+            if args.batch_size:
+                overrides["batch_size"] = args.batch_size
+            if overrides:
+                cfg = cfg.with_overrides(**overrides)
             rule = RunRule(
-                seed=args.seed if args.seed is not None else cfg.run.seed,
-                batch_size=args.batch_size or cfg.run.batch_size,
+                seed=cfg.run.seed,
+                batch_size=cfg.run.batch_size,
                 retry_limit=cfg.run.retry_limit,
                 refusal_ratio=cfg.run.refusal_ratio,
                 country_frame_margin=cfg.run.country_frame_margin,
@@ -293,7 +375,7 @@ def main(argv: Sequence[str]) -> int:
         if args.command == "prepare":
             return _prepare(cfg)
         if args.command == "verify":
-            return _verify(cfg)
+            return _verify(cfg, twin=args.twin)
         if args.command == "reverse":
             return _reverse(cfg, args.into)
         if args.command == "report":

@@ -50,12 +50,28 @@ SANIT_MODEL_BASE_URL, а имя модели из конфига (``RunConfig.mo
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 
 from ..errors import NetworkUnavailable
 from ..models import ProviderResponse, ResponseItem, Usage
 
 DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2", "КЗ-3"})
+
+
+def _call_seed(batch) -> int:
+    """Детерминированный seed одного вызова модели -- тождество пакета числом.
+
+    ⛔ Считается из seed прогона, класса значений и списка «ячейка + номер
+    попытки»: одинаковый пакет в двух прогонах даёт одинаковый seed, повторная
+    попытка по той же ячейке -- уже другой.
+    """
+    parts = "|".join(
+        f"{item.key}#{item.attempt}" for item in sorted(batch.items, key=lambda i: (str(i.key), i.attempt))
+    )
+    salt = f"{batch.seed}|{batch.value_class}|{parts}"
+    digest = hashlib.blake2b(salt.encode("utf-8"), digest_size=4).digest()
+    return int.from_bytes(digest, "big")
 
 
 class ModelProvider:
@@ -86,14 +102,33 @@ class ModelProvider:
         if base_url and "/" not in model_name:
             model_name = f"openai/{model_name}"
 
+        # ⛔ ПОВТОРЯЕМОСТЬ ПРОГОНА (критерий 21) начинается здесь, а не в раннере.
+        # Пока поставщик замен отвечает на один и тот же запрос по-разному, два
+        # прогона с одним seed совпасть не могут ни при какой логике выше --
+        # раньше вызов шёл с temperature=0.7 и без seed, то есть повторяемость
+        # была невозможна по построению. Два рычага, которые есть у клиента:
+        #   temperature=0 -- убрать разброс выборки;
+        #   seed -- закрепить оставшийся.
+        # ⛔ Seed вызова СВОЙ у каждого пакета и меняется с номером попытки:
+        # общий seed прогона на все вызовы означал бы, что повторный запрос
+        # после отклонённой замены вернёт ТУ ЖЕ замену, и повторы выродились бы
+        # в пустой круг до RetriesExhausted. Соль -- это и есть тождество
+        # пакета: seed прогона, класс значений, ячейки и номера попыток.
         call_kwargs = dict(
             model=model_name,
             api_key=key,
             messages=[{"role": "user", "content": self._prompt(batch)}],
-            temperature=0.7,
+            temperature=0,
+            seed=_call_seed(batch),
         )
         if base_url:
             call_kwargs["api_base"] = base_url
+
+        # ⛔ Шлюз, не знающий параметра `seed`, не должен ронять прогон: litellm
+        # выбрасывает неподдерживаемые параметры вместо ошибки. Повторяемость
+        # тогда просто не достигается, и критерий 21 честно краснеет -- это
+        # разные исходы, и путать их отказом посреди прогона нельзя.
+        litellm.drop_params = True
 
         try:
             response = litellm.completion(**call_kwargs)

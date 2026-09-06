@@ -443,3 +443,52 @@ def test_c28_report_states_both_parts_of_the_hundred_percent(report):
     """«100 %» не считается по одной трети области: обе части названы в отчёте."""
     numbers = {r for row in report.reverse_rows for r in (row.expect, row.fact)}
     assert any(str(R.C28_REVERSIBLE_CELLS) in str(n) for n in numbers)
+
+
+# --- критерий 21: парный прогон из CLI --------------------------------------
+
+
+def test_twin_runs_are_bitwise_equal_and_leave_nothing_behind(
+    monkeypatch, config, admin_conn, ref_schema
+):
+    """⛔ Критерий 21 закрывается РЕАЛИЗАЦИЕЙ: `verify --twin` проводит два
+    прогона с одним seed на свежих копиях и сравнивает 16 хешей.
+
+    Проверяется здесь ровно то, чем владеет этот репозиторий: обвязка парного
+    прогона. Разброс самой языковой модели ей не подчиняется -- поставщик
+    подменён детерминированным двойником (тот же приём, что у
+    `test_cli_returns_hard_stop_code_on_network_failure`), и остаётся вопрос,
+    на который тест отвечает: одинаковы ли базы, когда одинаковы ответы.
+
+    ⛔ Второе утверждение теста не менее важно первого: замер не оставляет за
+    собой ни схем на сервере, ни файлов на диске. Второй словарь той же базы --
+    это ещё один деанонимизатор, и он обязан исчезнуть вместе с копией.
+    """
+    from sanitizer import cli, db
+    from helpers import fakes
+
+    twin = fakes.FakeModelProvider(seed=config.run.seed)
+    monkeypatch.setattr(
+        "sanitizer.providers.model.ModelProvider.supply",
+        lambda self, batch: twin.supply(batch),
+    )
+
+    hashes_a, hashes_b = cli._twin_runs(config)
+
+    assert hashes_a and hashes_b, "парный прогон вернул пустые своды хешей"
+    assert set(hashes_a) == set(hashes_b), "своды сняты с разных наборов таблиц"
+    assert len(hashes_a) == R.C8_SCHEMA["tables"], (
+        f"хешей {len(hashes_a)}, а базовых таблиц {R.C8_SCHEMA['tables']}")
+    mismatched = [t for t in sorted(hashes_a) if hashes_a[t] != hashes_b[t]]
+    assert not mismatched, f"прогоны разошлись по таблицам: {mismatched}"
+
+    left = [r["s"] for r in db.rows(
+        admin_conn,
+        "SELECT SCHEMA_NAME s FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE %s",
+        (f"{config.stand.work_schema}_twin_%",),
+    )]
+    assert not left, f"после замера на сервере остались схемы: {left}"
+
+    workdir = config.paths.dictionary.parent
+    strays = sorted(p.name for p in workdir.glob("twin_*"))
+    assert not strays, f"после замера на диске остались файлы: {strays}"

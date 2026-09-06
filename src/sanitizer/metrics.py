@@ -101,6 +101,12 @@ def _table_hashes(conn, schema: str) -> dict:
     return out
 
 
+#: ⛔ Публичное имя того же инструмента: парный прогон (критерий 21) считает хеши
+#: из CLI, и тянуть туда приватное имя чужого модуля -- значит делать вид, что
+#: связи нет. Связь есть, и она называется.
+table_hashes = _table_hashes
+
+
 def _key_expr(pk_cols: tuple) -> str:
     if len(pk_cols) == 1:
         return f"`{pk_cols[0]}`"
