@@ -156,7 +156,11 @@ class Dictionary:
         self._records: dict = {}   # CellKey -> DictRecord
         self._breaks: list = []    # [BreakRecord, ...]
         self._scope: dict = {}     # scope_id(str) -> каноническое значение (до кейс-конвенции)
-        self._taken: dict = {}     # cls -> set(норм. значение) -- occupied, критерий 26
+        self._taken: dict = {}     # cls -> set(норм. значение) -- уже выданные замены
+        #: cls -> сколько раз замена досталась ВТОРОМУ исходному значению (склейка).
+        #: 📌 Р-117: не провал, а число для критерия 26 -- мера того, насколько
+        #: исчерпался пул поставщика.
+        self._merges: dict = {}
         self._seen_old: dict = {}  # (cls, norm_old) -> set(scope_repr) -- бухгалтерия разрывов
         # ⛔ Ревизия, дефект 2: потолок повторов -- ПО ЗНАЧЕНИЮ (§4 ПРАВИЛА-ОТКАЗ.md),
         # а не по ячейке. У классов "по ячейке" (КЗ-6..КЗ-8, реюза замены НЕТ --
@@ -554,15 +558,32 @@ class Dictionary:
                 passed = self._passes_hard(cls, candidate, it)
                 if passed is not None:
                     hard_passed.append(passed)
+            # 📌 ЛЕСТНИЦА ПРЕДПОЧТЕНИЙ (Р-93 + Р-117). Ни одна ступень не отказ:
+            # отказать вправе только две жёсткие проверки выше. Порядок ступеней
+            # -- порядок ценности: сперва замена, свободная и от чужого исходного,
+            # и от уже выданных; в конце -- любая прошедшая жёсткие проверки.
+            # 📌 Склейка (последние ступени) наступает ТОЛЬКО когда поставщик не
+            # дал ничего нового -- она исход, а не норма, и потому её число в
+            # отчёте читается как мера исчерпания пула, а не как политика.
+            ladder = (
+                ("свободна и от чужого исходного, и от уже выданных", True, True),
+                ("свободна от уже выданных", True, False),
+                ("свободна от чужого исходного", False, True),
+                ("любая прошедшая жёсткие проверки", False, False),
+            )
             accepted = None
-            for candidate in hard_passed:
-                if not self._collides_with_foreign_original(cls, candidate):
+            for _why, avoid_taken, avoid_foreign in ladder:
+                for candidate in hard_passed:
+                    if avoid_taken and self._collides_with_taken(cls, candidate):
+                        continue
+                    if avoid_foreign and self._collides_with_foreign_original(cls, candidate):
+                        continue
                     accepted = candidate
                     break
-            if accepted is None and hard_passed:
-                # ⛔ Ни один не свободен от чужой коллизии -- принимаем первого
-                # прошедшего жёсткие проверки (предпочтение, не гейт, Р-93).
-                accepted = hard_passed[0]
+                if accepted is not None:
+                    break
+            if accepted is not None and self._collides_with_taken(cls, accepted):
+                self._merges[cls] = self._merges.get(cls, 0) + 1
             if accepted is None:
                 it["attempt"] += 1  # по-прежнему свой на ячейку -- разнообразие кандидатов
                 if candidates:
@@ -652,32 +673,47 @@ class Dictionary:
         return "прошёл"
 
     def _passes_hard(self, cls: str, candidate: Any, it: Mapping) -> Any:
-        """⛔ Р-93: РОВНО три жёстких проверки, отказ БЕЗ права предпочтения.
+        """📌 Р-117: жёстких проверок осталось ДВЕ, отказ БЕЗ права предпочтения.
 
-        Длиннее лимита класса · равен СВОЕМУ исходному значению ЭТОЙ ячейки
-        (``it["current"]``) · ломает взаимную однозначность (уже занят в
-        ``self._taken[cls]``). Совпадение с ЧУЖИМ исходным (универсум
-        ``self._originals_norm`` / ``self.originals.geo``) сюда больше НЕ входит
-        -- см. ``_collides_with_foreign_original`` (предпочтение, не отказ).
+        Длиннее лимита колонки · равен СВОЕМУ исходному значению ЭТОЙ ячейки
+        (``it["current"]``). Обе -- о самой ячейке, и обе неотменяемы: замена,
+        не влезающая в колонку, не запишется, а равная своему исходному не
+        является заменой вовсе.
+        📌 Две бывшие проверки стали ПРЕДПОЧТЕНИЯМИ, каждая со своим числом в
+        отчёте: совпадение с ЧУЖИМ исходным (Р-93, критерий 1в) и занятость
+        замены другим значением (Р-117, критерий 26). Причина одна и та же:
+        запрет был строже задачи и превращал разрешимую ситуацию в остановку.
         """
         if isinstance(candidate, str):
             limit = it["field_rule"].length_limit
             if limit is not None and len(candidate) > limit:
                 return None
             norm_c = _norm(candidate)
-            if norm_c in self._taken.get(cls, set()):
-                return None
             if norm_c == _norm(it["current"]):
                 return None
             return candidate
         if isinstance(candidate, (bytes, bytearray)):
             candidate = bytes(candidate)
-            if candidate in self._taken.get(cls, set()):
-                return None
             if candidate == it["current"]:
                 return None
             return candidate
         return None
+
+    def _collides_with_taken(self, cls: str, candidate: Any) -> bool:
+        """Замена уже выдана другому исходному значению этого класса -- СКЛЕЙКА.
+
+        📌 Р-117: предпочтение, НЕ отказ. Личность несёт первичный ключ, его
+        инструмент не трогает (критерий 18), а запись словаря заведена на ячейку
+        («таблица + ключ + колонка») -- обратный прогон разводит тёзок по ключу
+        даже при полностью совпавших именах. Тёзки существуют и в жизни.
+        📌 Стоит склейка одного: кардинальности столбца. Поэтому она допускается
+        последней ступенью лестницы и публикуется числом (критерий 26).
+        """
+        if isinstance(candidate, str):
+            return _norm(candidate) in self._taken.get(cls, set())
+        if isinstance(candidate, (bytes, bytearray)):
+            return bytes(candidate) in self._taken.get(cls, set())
+        return False
 
     def _collides_with_foreign_original(self, cls: str, candidate: Any) -> bool:
         """⛔ Р-93: ПРЕДПОЧТЕНИЕ, не отказ -- кандидат совпадает с ЧУЖИМ исходным

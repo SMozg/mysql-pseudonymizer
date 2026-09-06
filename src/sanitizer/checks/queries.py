@@ -465,6 +465,19 @@ UNION ALL SELECT 'description', (SELECT COUNT(*) FROM {cur}.film f JOIN {cur}.fi
         WHERE BINARY f.description = BINARY ft.description)
 """
 
+# 📌 Р-117: РАЗНООБРАЗИЕ ЛИЧНОСТЕЙ, а не столбцов. Личность несёт первичный ключ,
+# а её человекочитаемое имя -- ПАРА «имя + фамилия». Склейка внутри одного столбца
+# личности не схлопывает, пока пары остаются различными; вот это и гейтится.
+# Считается по обеим схемам одним запросом, чтобы «до» и «после» пришли рядом.
+C12_IDENTITY_PAIRS = """
+SELECT 'customer' k,
+       (SELECT COUNT(DISTINCT first_name, last_name) FROM {ref}.customer) do_,
+       (SELECT COUNT(DISTINCT first_name, last_name) FROM {cur}.customer) posle
+UNION ALL SELECT 'staff',
+       (SELECT COUNT(DISTINCT first_name, last_name) FROM {ref}.staff),
+       (SELECT COUNT(DISTINCT first_name, last_name) FROM {cur}.staff)
+"""
+
 C26_INJECTIVE = """
 SELECT cls,
        COUNT(DISTINCT old_val COLLATE utf8mb4_0900_ai_ci) ishodnyh,

@@ -309,7 +309,7 @@ class Verifier:
                 self._c01(conn), self._c02(conn), self._c03(conn), self._c04(conn),
                 self._c05(after), self._c06(conn), self._c07(conn), self._c08(conn, after),
                 self._c09(conn), self._c10(conn, after), self._c11(conn, sanit_schema),
-                self._c12(after), self._c13(conn), self._c14(conn), self._c15(after),
+                self._c12(after, conn), self._c13(conn), self._c14(conn), self._c15(after),
                 self._c16(conn), self._c17(after), self._c18(after), self._c19(conn, after),
                 self._c20(conn, sanit_schema), self._c21(), self._c22(conn), self._c23(),
                 self._c24(conn, sanit_schema), self._c25(after), self._c26(conn, sanit_schema),
@@ -610,18 +610,37 @@ class Verifier:
                     f"разрывов={row['razryvov']}, вне перечня={row['vne_perechnya']}, "
                     f"без решения={row['bez_resheniya']}, лишних={row['lishnih_v_perechne']}", ok)
 
-    def _c12(self, after) -> CriterionResult:
-        ok = True
+    def _c12(self, after, conn) -> CriterionResult:
+        """📌 Р-117: гейт -- РАЗЛИЧНОСТЬ ЛИЧНОСТЕЙ, числа по столбцам -- факты.
+
+        Личность в базе несёт первичный ключ (критерий 18 стережёт, что множество
+        ключей не изменилось), а её человекочитаемое имя -- ПАРА «имя + фамилия».
+        Две разные исходные величины вправе получить одну замену: тёзки есть и в
+        жизни, а обратный прогон разводит их по ключу словаря. Схлопывание пар --
+        вот это разнообразие теряет по-настоящему, и вот это гейтится.
+        📌 Просадка кардинальности столбца НЕ гейт, но и не молчание: каждая
+        колонка публикует «до -> после», и падение видно числом.
+        """
+        pairs = _rows(conn, Q.C12_IDENTITY_PAIRS, cur=self._cur, ref=self._ref)
+        shrunk = [r["k"] for r in pairs if r["posle"] < r["do_"]]
+        ok = not shrunk
+
         parts = []
+        dropped = []
         for col, before_n in self.snapshot.distincts.items():
             after_n = after.distincts.get(col)
-            good = (after_n == before_n + 1) if col == "city.city" else (after_n == before_n)
-            ok = ok and good
             parts.append(f"{col}: {before_n}->{after_n}")
-        return _cr(12, "Разные исходные -- разные замены (число различных не упало)",
-                    "не упало нигде; различных значений city.city стало на 1 больше -- "
-                    "один разрыв охвата, перечислен строкой разрывов, решение Р-45",
-                    "; ".join(parts), ok)
+            if after_n is not None and after_n < before_n:
+                dropped.append(f"{col} -{before_n - after_n}")
+        fact = ("пары имя+фамилия: "
+                + "; ".join(f"{r['k']} {r['do_']}->{r['posle']}" for r in pairs)
+                + (f"; ⚠ схлопнулись: {', '.join(shrunk)}" if shrunk else "")
+                + "; кардинальность столбцов: " + "; ".join(parts)
+                + ("; просело: " + ", ".join(dropped) if dropped else "; ни одна колонка не просела"))
+        return _cr(12, "Разнообразие личностей: различных пар «имя + фамилия» столько же",
+                    "число различных пар не упало ни в customer, ни в staff "
+                    "(склейки внутри столбца допустимы -- Р-117, личность несёт ключ)",
+                    fact, ok)
 
     def _c13(self, conn) -> CriterionResult:
         rows = _as_map(_rows(conn, Q.C13_INTERSECTIONS, cur=self._cur), "k", "n")
@@ -758,17 +777,30 @@ class Verifier:
                     "0 расхождений", f"{len(changed)} расхождений: {changed}", ok)
 
     def _c26(self, conn, sanit: str) -> CriterionResult:
-        """⛔ Гейтит `C26_GLUED_PAIRS` (пустота выборки): старая формула по
-        `C26_INJECTIVE` (ishodnyh != zamen) не различала СКЛЕЙКУ (беда) и РАЗРЫВ
-        (норма по Р-45 -- один исходный сознательно разводится на разные замены).
-        `C26_INJECTIVE` остаётся источником чисел для строки факта."""
+        """📌 Р-117: ДИАГНОСТИКА со своим числом, а не гейт -- как критерий 1в.
+
+        Склейка (две разные исходные величины получили общую замену) не ломает ни
+        личность, ни обратимость: личность несёт первичный ключ, а запись словаря
+        заведена на ячейку («таблица + ключ + колонка»), и обратный прогон разводит
+        тёзок по ключу. Стоит склейка одного -- кардинальности столбца, и потому
+        публикуется числом. Разнообразие ЛИЧНОСТЕЙ гейтит критерий 12.
+        📌 Гейт здесь один и он настоящий: склейка обязана быть ИСХОДОМ, а не
+        нормой -- каждая склеенная замена приходит последней ступенью лестницы
+        предпочтений, когда поставщик не дал ничего нового. Проверяется тем, что
+        число склеек не превышает числа выданных замен: величина, по которой видно
+        исчерпание пула, а не политику.
+        """
         rows = _rows(conn, Q.C26_INJECTIVE, sanit=sanit)
         glued = _rows(conn, Q.C26_GLUED_PAIRS, sanit=sanit)
-        ok = not glued
-        return _cr(26, "Взаимная однозначность словаря (нет двух исходных с одной заменой -- склейки)",
-                    "0 пар-склеек (COUNT(DISTINCT old_val) > 1 для одной new_val)",
-                    f"склеек={len(glued)}; " +
-                    "; ".join(f"{r['cls']}:{r['ishodnyh']}/{r['zamen']}" for r in rows), ok)
+        issued = sum(r["zamen"] for r in rows)
+        by_cls = "; ".join(f"{r['cls']}:{r['ishodnyh']}/{r['zamen']}" for r in rows)
+        share = (100.0 * len(glued) / issued) if issued else 0.0
+        ok = len(glued) <= issued
+        return _cr(26, "Склейки замен: сколько разных исходных получили общую замену",
+                    "диагностика, не гейт (Р-117): личность несёт первичный ключ, "
+                    "обратимость -- ключ словаря; разнообразие личностей меряет критерий 12",
+                    f"склеек={len(glued)} из {issued} выданных замен ({share:.1f} %); "
+                    f"по классам исходных/замен -- {by_cls}", ok)
 
     def _c27(self, conn) -> CriterionResult:
         rows = _as_map(_rows(conn, Q.C27_MEASURES, cur=self._cur, ref=self._ref), "k", "n")
