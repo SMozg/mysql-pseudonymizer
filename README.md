@@ -5,7 +5,7 @@
 [![tests](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml/badge.svg)](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml)
 [![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
-[![tests 156/156](https://img.shields.io/badge/tests-156%2F156-brightgreen.svg)](tests)
+[![tests 157/157](https://img.shields.io/badge/tests-157%2F157-brightgreen.svg)](tests)
 
 На вход — работающая база MySQL, на выход — она же: та же схема, столько же строк, те же связи,
 но без персональных данных. Замены осмысленные, а не `xxxxx`, и обратимые по словарю.
@@ -112,7 +112,7 @@ python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 Незаполненная переменная останавливает прогон предпусковым гейтом с её именем,
 а не отказом соединения без причины.
 
-Тесты — тем же стендом: `pytest` (156 тестов, около 16 минут — они гоняют
+Тесты — тем же стендом: `pytest` (157 тестов, около 25 минут — они гоняют
 настоящие прогоны на копиях базы, а не заглушки).
 
 `config/config.yaml` — под демо-стенд; для своей базы `config/config.example.yaml` и `fieldmap.yaml`.
@@ -124,7 +124,7 @@ python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 | что | число |
 |---|---|
 | критерии приёмки | **29 P из 30** |
-| тесты | **156 из 156** |
+| тесты | **157 из 157** |
 | обратимость | **5267 из 5267 ячеек**, невосстановимых 0, сверка с «ДО» совпала |
 | объём | 47 268 строк до и после |
 | связи | 22 внешних ключа разрешаются, 0 сирот |
