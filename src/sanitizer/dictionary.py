@@ -584,9 +584,21 @@ class Dictionary:
                 fails = self._value_attempts.get(vk, 0) + 1
                 self._value_attempts[vk] = fails
                 if fails > rule.retry_limit:
+                    # 📌 Остановка называет ПРИЧИНУ, а не только факт: счёт по видам
+                    # отказа для всех кандидатов, отбитых на этом значении. Сами
+                    # кандидаты в текст не попадают -- только имена причин и числа
+                    # (критерий 23: ни ПД, ни записей словаря в журнале).
+                    reasons: dict = {}
+                    for tried in it["rejected"]:
+                        why = self._hard_reason(cls, tried, it)
+                        reasons[why] = reasons.get(why, 0) + 1
+                    breakdown = ", ".join(
+                        f"{why}: {n}" for why, n in sorted(reasons.items(), key=lambda kv: -kv[1])
+                    ) or "кандидатов не было вовсе"
                     raise RetriesExhausted(
                         f"класс {cls}: попыток на значение {fails} -- потолок "
-                        f"{rule.retry_limit} исчерпан (ключ {_cell_str(it['cell'])})")
+                        f"{rule.retry_limit} исчерпан (ключ {_cell_str(it['cell'])}); "
+                        f"отбито кандидатов {len(it['rejected'])} -- {breakdown}")
                 next_round.append(it)
                 continue
             self._accept(cls, accepted, it, results)
@@ -608,6 +620,36 @@ class Dictionary:
         if isinstance(raw, (list, tuple)):
             return tuple(raw)
         return (raw,)
+
+    def _hard_reason(self, cls: str, candidate: Any, it: Mapping) -> str:
+        """Какая из трёх жёстких проверок отбила кандидата -- ОДНИМ словом.
+
+        📌 Нужна не фильтру, а ГРОМКОЙ ОСТАНОВКЕ. Раньше исчерпание повторов
+        сообщало только «потолок исчерпан»: по такому тексту нельзя отличить
+        «поставщик предлагает уже занятые замены» от «замены не влезают в
+        лимит колонки» -- а это разные болезни с разным лечением. Правило
+        проекта: остановка обязана называть причину, иначе она молчащая.
+        📌 Возвращается ИМЯ причины, никогда само значение: кандидаты в тексте
+        отказа -- это данные, которым в журнале не место (критерий 23).
+        """
+        if not isinstance(candidate, (str, bytes, bytearray)):
+            return "не строка и не байты"
+        if isinstance(candidate, str):
+            limit = it["field_rule"].length_limit
+            if limit is not None and len(candidate) > limit:
+                return "длиннее лимита колонки"
+            norm_c = _norm(candidate)
+            if norm_c in self._taken.get(cls, set()):
+                return "замена уже занята другим значением"
+            if norm_c == _norm(it["current"]):
+                return "совпал со своим исходным"
+            return "прошёл"
+        candidate = bytes(candidate)
+        if candidate in self._taken.get(cls, set()):
+            return "замена уже занята другим значением"
+        if candidate == it["current"]:
+            return "совпал со своим исходным"
+        return "прошёл"
 
     def _passes_hard(self, cls: str, candidate: Any, it: Mapping) -> Any:
         """⛔ Р-93: РОВНО три жёстких проверки, отказ БЕЗ права предпочтения.
