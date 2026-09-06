@@ -80,6 +80,21 @@ _UNKNOWN_PARAM_MARKS = ("unknown name", "unrecognized", "unsupported", "cannot f
 #: модель ответила и ответ отклонён фильтром, здесь ответа не было вовсе.
 _TRANSPORT_BACKOFF = (3, 8, 20)
 
+#: Отказ по КВОТЕ лечится иначе: окно у поставщика минутное, и трёхсекундная пауза
+#: только тратит попытку. Замерено 06.09: после отказа вызов проходит примерно через
+#: минуту. Лестница пересекает целое окно.
+_RATE_LIMIT_BACKOFF = (20, 45, 70)
+
+#: Имя типа отказа по квоте -- он же единственный, который лечится не только
+#: ожиданием, но и ТЕМПОМ последующих вызовов.
+_RATE_LIMIT_ERROR = "RateLimitError"
+
+#: Минимальный промежуток между вызовами. 📌 Включается НЕ СРАЗУ, а после первого
+#: отказа по квоте: предполагать чужой лимит нельзя (он разный у тарифов и моделей),
+#: а выяснить -- можно. Пока квота не жалуется, прогон идёт полным ходом.
+_PACE_SECONDS = 7.0
+_PACE = {"interval": 0.0, "last": 0.0}
+
 #: Типы отказов, которые лечатся ожиданием. ⛔ Именно ТИПЫ: текст исключения у
 #: litellm умеет нести заголовок или адрес с ключом и здесь не читается.
 _TRANSPORT_ERRORS = frozenset({
@@ -93,26 +108,54 @@ def _is_transport(exc) -> bool:
     return type(exc).__name__ in _TRANSPORT_ERRORS
 
 
-def _complete(kwargs):
-    """Вызов модели с повторами по отказам транспорта.
+def _wait_for_pace() -> None:
+    """Выдержать промежуток между вызовами, если темп уже включён."""
+    interval = _PACE["interval"]
+    if not interval:
+        return
+    due = _PACE["last"] + interval
+    now = time.monotonic()
+    if now < due:
+        time.sleep(due - now)
 
-    ⛔ Громкая остановка наступает ПОСЛЕ исчерпания повторов, а не на первом
+
+def _complete(kwargs):
+    """Вызов модели с повторами по отказам транспорта и с темпом под квоту.
+
+    📌 Громкая остановка наступает ПОСЛЕ исчерпания повторов, а не на первом
     сбое сети: иначе прогон длиной в восемь минут теряется от одной секунды
     чужой недоступности. Что произошло -- говорится вслух, чтобы задержка
-    прогона не выглядела зависанием.
+    не выглядела зависанием.
+
+    📌 Отказ по КВОТЕ отличается от прочих двумя вещами. Пауза длиннее целого
+    минутного окна -- трёхсекундная только тратит попытку. И он включает ТЕМП
+    на весь остаток прогона: иначе повторы сами становятся источником
+    превышения, ведь каждая неудачная попытка -- ещё один запрос в то же окно.
     """
     import litellm
 
-    for attempt, pause in enumerate(_TRANSPORT_BACKOFF, start=1):
+    attempts = len(_TRANSPORT_BACKOFF) + 1
+    for attempt in range(1, attempts + 1):
+        _wait_for_pace()
         try:
-            return litellm.completion(**kwargs)
+            response = litellm.completion(**kwargs)
+            _PACE["last"] = time.monotonic()
+            return response
         except Exception as exc:
-            if not _is_transport(exc):
+            _PACE["last"] = time.monotonic()
+            if not _is_transport(exc) or attempt == attempts:
                 raise
+            rate_limited = type(exc).__name__ == _RATE_LIMIT_ERROR
+            if rate_limited and not _PACE["interval"]:
+                _PACE["interval"] = _PACE_SECONDS
+                print(f"поставщик ограничил темп: дальше не чаще одного вызова "
+                      f"в {_PACE_SECONDS:.0f} с", file=sys.stderr)
+            ladder = _RATE_LIMIT_BACKOFF if rate_limited else _TRANSPORT_BACKOFF
+            pause = ladder[attempt - 1]
             print(f"поставщик недоступен ({type(exc).__name__}), попытка {attempt} из "
-                  f"{len(_TRANSPORT_BACKOFF) + 1}, пауза {pause} с", file=sys.stderr)
+                  f"{attempts}, пауза {pause} с", file=sys.stderr)
             time.sleep(pause)
-    return litellm.completion(**kwargs)
+    raise AssertionError("недостижимо: цикл повторов всегда возвращает или поднимает")
 
 
 def _rejects_seed(exc) -> bool:

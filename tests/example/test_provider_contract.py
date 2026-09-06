@@ -348,3 +348,53 @@ def test_permanent_gateway_failure_still_stops_loudly(monkeypatch, config):
 
     with pytest.raises(NetworkUnavailable):
         provider.supply(batch)
+
+
+def test_quota_refusal_slows_the_run_down_instead_of_killing_it(monkeypatch, config, capsys):
+    """📌 Отказ по КВОТЕ лечится темпом, а не только ожиданием.
+
+    Замерено 06.09 на живом прогоне: поставщик ответил `RateLimitError`, и повторы
+    с трёхсекундной паузой сами стали источником превышения — каждая попытка это
+    ещё один запрос в то же минутное окно. Отсюда два отличия от прочих отказов:
+    пауза пересекает целое окно, и на весь остаток прогона включается промежуток
+    между вызовами.
+
+    📌 Темп включается ПОСЛЕ первого отказа, а не заранее: чужой лимит разный у
+    тарифов и моделей, предполагать его нельзя — выяснить можно.
+    """
+    from sanitizer.providers import model as model_mod
+
+    class RateLimitError(Exception):
+        """Имя типа значимо: политика смотрит на ТИП, не на текст."""
+
+    calls = []
+
+    def _throttled(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RateLimitError("429")
+        return _FakeLiteLLMResponse(json.dumps({"0": ["Заглушка-Замена"]}))
+
+    monkeypatch.setattr("litellm.completion", _throttled)
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+    monkeypatch.setattr(model_mod, "_SEED_ACCEPTED", {})
+    monkeypatch.setattr(model_mod, "_RATE_LIMIT_BACKOFF", (0, 0, 0))
+    monkeypatch.setattr(model_mod, "_PACE", {"interval": 0.0, "last": 0.0})
+
+    provider = model_mod.ModelProvider(config)
+    cls = next(iter(provider.handles))
+    item = RequestItem(key=("probe_table", (1,), "probe_column"), attempt=0, value_class=cls,
+                       old_value="Probe Original Value",
+                       length_limit=R.CLASS_LIMITS.get(cls), fmt={})
+    batch = Batch(value_class=cls, items=(item,), taken=frozenset(), seed=1)
+
+    assert model_mod._PACE["interval"] == 0.0, "темп не должен быть включён заранее"
+
+    response = provider.supply(batch)
+
+    assert isinstance(response, ProviderResponse) and response.items
+    assert len(calls) == 2, f"ожидали повтор после отказа по квоте; вызовов {len(calls)}"
+    assert model_mod._PACE["interval"] == model_mod._PACE_SECONDS, (
+        "темп не включился после отказа по квоте")
+    assert "темп" in capsys.readouterr().err, "переход на щадящий темп не назван вслух"
