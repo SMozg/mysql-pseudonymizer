@@ -240,10 +240,19 @@ class Runner:
             try:
                 return self._run()
             except HardStop as exc:
-                self.runlog.log("stop", "hard_stop", {"error": type(exc).__name__})
+                # 📌 В журнал едет и ПРИЧИНА, не только имя типа. Замер 06.09:
+                # прогон встал `RetriesExhausted`, разбор по видам отказа лежал
+                # в тексте исключения -- и пропал вместе с потоком ошибок, а в
+                # журнале осталось голое имя типа. Журнал -- то, что переживает
+                # прогон; значит причина обязана быть в нём, а не только в выводе.
+                # 📌 Текст остановки строит `dictionary.py` из ИМЁН причин и чисел,
+                # без самих кандидатов -- критерий 23 держится там же, где строился.
+                self.runlog.log("stop", "hard_stop",
+                                {"error": type(exc).__name__, "reason": str(exc)})
                 raise
             except GateFailed as exc:
-                self.runlog.log("stop", "gate_failed", {"error": type(exc).__name__})
+                self.runlog.log("stop", "gate_failed",
+                                {"error": type(exc).__name__, "reason": str(exc)})
                 raise
         finally:
             # ⛔ Ревизия, правка: журнал ОБЯЗАН доехать на диск и при громкой
