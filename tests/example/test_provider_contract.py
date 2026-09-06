@@ -218,3 +218,56 @@ def test_request_item_carries_everything_the_provider_needs(sanitized):
         assert item.old_value
         assert item.length_limit == R.CLASS_LIMITS[item.value_class]
         assert item.fmt is not None
+
+
+# --- шлюз, не знающий параметра seed ----------------------------------------
+
+
+def test_gateway_that_rejects_seed_does_not_break_the_run(monkeypatch, config, capsys):
+    """⛔ Шлюз, отвечающий 400 на `seed`, обязан НЕ ронять прогон.
+
+    Замерено на живом шлюзе 06.09: документация обещает, что неизвестные
+    параметры «молча игнорируются», настоящий ответ -- жёсткий 400
+    `Unknown name "seed"`. `litellm.drop_params` тут не помогает: `seed` для
+    него ЗАКОННЫЙ параметр OpenAI, а шлюз объявлен OpenAI-совместимым.
+    Параметр, посланный вслепую, ронял бы КАЖДЫЙ прогон против такого
+    поставщика -- поэтому возможности шлюза выясняются, а не предполагаются.
+
+    ⛔ Тест требует ДВУХ вещей сразу: прогон дошёл до ответа И потеря
+    повторяемости названа вслух. Молча упавшая до `temperature=0` замена
+    сделала бы вердикт критерия 21 нечитаемым.
+    """
+    from sanitizer.providers import model as model_mod
+
+    seen = []
+
+    def _picky_completion(**kwargs):
+        seen.append("seed" in kwargs)
+        if "seed" in kwargs:
+            raise RuntimeError('Invalid JSON payload received. Unknown name "seed": '
+                               'Cannot find field.')
+        return _FakeLiteLLMResponse(json.dumps({"0": ["Заглушка-Замена"]}))
+
+    monkeypatch.setattr("litellm.completion", _picky_completion)
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+    # ⛔ реестр «принимает ли шлюз seed» -- на процесс; тест обязан начать с чистого
+    monkeypatch.setattr(model_mod, "_SEED_ACCEPTED", {})
+
+    provider = model_mod.ModelProvider(config)
+    cls = next(iter(provider.handles))
+    item = RequestItem(key=("probe_table", (1,), "probe_column"), attempt=0, value_class=cls,
+                       old_value="Probe Original Value",
+                       length_limit=R.CLASS_LIMITS.get(cls), fmt={})
+    batch = Batch(value_class=cls, items=(item,), taken=frozenset(), seed=1)
+
+    response = provider.supply(batch)
+
+    assert isinstance(response, ProviderResponse) and response.items
+    assert seen == [True, False], f"ожидали вызов с seed, потом без него; было {seen}"
+    assert "seed" in capsys.readouterr().err, "потеря повторяемости не названа вслух"
+
+    # ⛔ Второй пакет уже НЕ пробует seed заново: выясненное держится до конца процесса.
+    seen.clear()
+    provider.supply(batch)
+    assert seen == [False], f"параметр пробовался повторно: {seen}"

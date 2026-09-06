@@ -52,11 +52,33 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import sys
 
 from ..errors import NetworkUnavailable
 from ..models import ProviderResponse, ResponseItem, Usage
 
 DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2", "КЗ-3"})
+
+
+#: Принимает ли поставщик параметр `seed`. Ключ -- имя модели, значение
+#: выясняется первым же отказом и держится до конца процесса.
+#: ⛔ Не константа и не настройка: настройка про чужой сервер стареет молча,
+#: а замер -- нет.
+_SEED_ACCEPTED: dict = {}
+
+#: Слова, которыми поставщики отказывают ИМЕННО в параметре, а не в доступе.
+_UNKNOWN_PARAM_MARKS = ("unknown name", "unrecognized", "unsupported", "cannot find field",
+                        "not supported", "unexpected keyword")
+
+
+def _rejects_seed(exc) -> bool:
+    """Отказ ли это по параметру `seed` -- в отличие от отказа в доступе или сети.
+
+    ⛔ Текст исключения читается ЗДЕСЬ и НИКУДА не печатается: у litellm он
+    умеет нести заголовок или адрес с ключом. Наружу уходит только «да/нет».
+    """
+    text = str(exc).lower()
+    return "seed" in text and any(mark in text for mark in _UNKNOWN_PARAM_MARKS)
 
 
 def _call_seed(batch) -> int:
@@ -124,22 +146,42 @@ class ModelProvider:
         if base_url:
             call_kwargs["api_base"] = base_url
 
-        # ⛔ Шлюз, не знающий параметра `seed`, не должен ронять прогон: litellm
-        # выбрасывает неподдерживаемые параметры вместо ошибки. Повторяемость
-        # тогда просто не достигается, и критерий 21 честно краснеет -- это
-        # разные исходы, и путать их отказом посреди прогона нельзя.
+        # ⛔ ЗАМЕРЕНО 06.09, а не взято из документации. Документация шлюза
+        # обещает, что неизвестные параметры «молча игнорируются»; настоящий
+        # ответ на `seed` -- жёсткий 400 `Unknown name "seed"`. `drop_params`
+        # тут не спасает: для litellm `seed` -- ЗАКОННЫЙ параметр OpenAI, он
+        # выбрасывает только то, что считает неподдерживаемым, а этот шлюз
+        # объявлен OpenAI-совместимым. То есть параметр, посланный вслепую,
+        # ронял бы КАЖДЫЙ прогон против такого поставщика.
         litellm.drop_params = True
+        if _SEED_ACCEPTED.get(model_name, True):
+            call_kwargs["seed"] = _call_seed(batch)
 
         try:
             response = litellm.completion(**call_kwargs)
-        except Exception as exc:  # сеть/провайдер недоступны -- громкая остановка
-            # ⛔ НЕ `from exc`: у litellm текст ошибки авторизации умеет нести
-            # заголовок или URL с ключом, а `from exc` протащил бы его в
-            # `__cause__` и напечатал при любом непойманном подъёме (ревизия,
-            # правка). Причина -- ТИПОМ, не текстом; `from None` рвёт цепочку.
-            raise NetworkUnavailable(
-                f"поставщик (модель) недоступен по сети: {type(exc).__name__}"
-            ) from None
+        except Exception as exc:
+            # ⛔ Возможности шлюза ВЫЯСНЯЮТСЯ, а не предполагаются: отказ именно
+            # по `seed` снимает параметр на весь процесс и повторяет вызов один
+            # раз. Повторяемость тогда держится на одной `temperature=0`, и это
+            # говорится вслух ОДИН раз -- иначе вердикт критерия 21 не прочесть.
+            # ⛔ НИ ОДНА ветка ниже не печатает текст ошибки: у litellm он умеет
+            # нести заголовок или URL с ключом. Причина -- ТИПОМ, не текстом;
+            # `from None` рвёт цепочку, чтобы `__cause__` не всплыл при любом
+            # непойманном подъёме выше (ревизия, правка).
+            if "seed" not in call_kwargs or not _rejects_seed(exc):
+                raise NetworkUnavailable(
+                    f"поставщик (модель) недоступен по сети: {type(exc).__name__}"
+                ) from None
+            _SEED_ACCEPTED[model_name] = False
+            call_kwargs.pop("seed")
+            print("поставщик не принимает параметр seed: повторяемость прогона "
+                  "держится только на temperature=0", file=sys.stderr)
+            try:
+                response = litellm.completion(**call_kwargs)
+            except Exception as exc2:
+                raise NetworkUnavailable(
+                    f"поставщик (модель) недоступен по сети: {type(exc2).__name__}"
+                ) from None
 
         text = response["choices"][0]["message"]["content"]
         parsed = self._parse(text)
