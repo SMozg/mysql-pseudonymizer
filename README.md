@@ -164,8 +164,9 @@ POINT(135.94 27.86)` — по рамке Япония, но точка може�
 
 Python 3.12 · MySQL 8 со строгим `sql_mode` (`STRICT_TRANS_TABLES`), соединение `utf8mb4` ·
 Docker Compose для демо-стенда. Права: чтение исходной схемы, полные права на `sanit_*`,
-`SHOW_ROUTINE` и `log_bin_trust_function_creators` при двоичном журнале; root не нужен —
-в демо-стенде всё в `demo/sakila/initdb/03-grants.sql`.
+глобальный `SHOW_ROUTINE` (без него сервер отдаёт тело хранимой программы как `NULL`, а не
+отказ) и `log_bin_trust_function_creators` при включённом двоичном журнале; root не нужен.
+Демо-стенд выдаёт оба сам: `demo/sakila/initdb/03-grants.sql` и `demo/sakila/docker-compose.yml`.
 
 Секреты — только через окружение (`SANIT_KEY`, `SANIT_MODEL_KEY`, `SANIT_MODEL_BASE_URL`,
 `MYSQL_*`; шаблон — `.env.example`): конфиг уезжает в логи и в git, окружение — нет.

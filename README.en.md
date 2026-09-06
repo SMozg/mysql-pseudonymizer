@@ -74,30 +74,55 @@ the way back closes.
 
 ## Quick start
 
+Run every command **from the repository root**: that is where `.env` and `config/` are read from.
+
 ```bash
 git clone https://github.com/SMozg/mysql-pseudonymizer.git
 cd mysql-pseudonymizer
 pip install -e ".[dev]"
 
-# demo stand: Sakila data lives in the repo
-cd demo/sakila && cp .env.example .env    # fill in the passwords
-docker compose up -d && docker compose ps # wait for healthy
-cd ../..
+# 1. demo stand. Sakila data lives in the repo, nothing to download.
+cp demo/sakila/.env.example demo/sakila/.env    # set MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD
+docker compose -f demo/sakila/docker-compose.yml up -d
+docker compose -f demo/sakila/docker-compose.yml ps    # wait for healthy
+#   The stand runs under its own compose project (`sanitizer-sakila`) with its own
+#   volume: it never touches neighbouring MySQL containers. Tear down with data —
+#   docker compose -f demo/sakila/docker-compose.yml down -v
 
-export SANIT_KEY=...   # dictionary key, template — .env.example
+# 2. tool keys — into the root .env (never committed)
+cp .env.example .env
+python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
+#   SANIT_KEY is a hex string; it encrypts the replacement dictionary.
+#   SANIT_MODEL_KEY goes into the same file: without it first names, last names and
+#   cities cannot be replaced (classes КЗ-1…КЗ-3 go through the model).
+#   SANIT_MODEL_BASE_URL — if the model sits behind an OpenAI-compatible gateway.
+
+# 3. the run
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
 python -m sanitizer verify  --config config/config.yaml
 python -m sanitizer reverse --config config/config.yaml --into sanit_restored
 ```
 
+The stand password and both keys are read **from the environment**; `.env` merely feeds it,
+and a variable already set outside wins over the file. Port and user live in a single line of
+`demo/sakila/.env` — the same line docker compose uses and the config references
+(`${MYSQL_HOST_PORT}`, `${MYSQL_USER}`): if port 3307 is taken, one place changes. An unfilled
+variable stops the run at the pre-flight gate naming it, instead of a connection refusal with
+no reason.
+
+Tests use the same stand: `pytest` (156 tests, about 16 minutes — they run real sanitisation
+passes over copies of the database, not stubs).
+
 `config/config.yaml` targets the demo stand; for your own database use `config/config.example.yaml`
 and `config/fieldmap.yaml`. `--declare continue` reuses an existing dictionary. Exit codes: **0** clean acceptance · **1** red acceptance · **2** loud stop mid-run · **3** gate failed.
 
 Requirements: Python 3.12 · MySQL 8 with strict `sql_mode` (`STRICT_TRANS_TABLES`) and `utf8mb4` ·
 Docker Compose for the demo. The tool needs read on the source schema and full rights on the
-`sanit_*` schemas it creates; root is not required. Secrets live in the environment, never in the
-config — see `.env.example`.
+`sanit_*` schemas it creates; root is not required. Copying stored programs also needs the global
+`SHOW_ROUTINE` privilege, and `log_bin_trust_function_creators` when binary logging is on — the
+demo stand sets both itself (`demo/sakila/initdb/03-grants.sql`, `docker-compose.yml`). Secrets
+live in the environment, never in the config — see `.env.example`.
 
 ## What the numbers prove
 
