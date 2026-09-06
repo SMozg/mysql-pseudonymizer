@@ -16,6 +16,7 @@ import re
 from datetime import datetime, timezone
 
 from . import db
+from .errors import DdlNotVisible
 from .models import StandPassport
 
 _GROUP_CONCAT_MAX_LEN = 1073741824
@@ -58,6 +59,25 @@ def make_copy(src: str, dst: str, *, conn) -> None:
     def requalify(ddl: str) -> str:
         return ddl.replace(f"`{src}`.", f"`{dst}`.")
 
+    def ddl_or_stop(value, *, kind: str, name: str) -> str:
+        """DDL объекта либо громкая остановка с ПРИЧИНОЙ.
+
+        ⛔ Пустое тело -- не пустой объект, а отсутствие прав: MySQL 8.0.20+
+        отдаёт ``NULL`` вместо отказа, когда у пользователя нет ``SHOW_ROUTINE``
+        и определитель чужой. Раньше это уходило дальше и падало
+        ``AttributeError: 'NoneType' object has no attribute 'replace'`` --
+        сообщение, по которому причину не восстановить.
+        """
+        if value is None:
+            raise DdlNotVisible(
+                f"{kind} `{src}`.`{name}`: сервер вернул пустое тело. У пользователя "
+                f"нет права читать его определение -- нужна глобальная привилегия "
+                f"SHOW_ROUTINE (в `ALL PRIVILEGES ON <схема>.*` она не входит) либо "
+                f"совпадение определителя. Для демо-стенда это выдаёт "
+                f"demo/sakila/initdb/03-grants.sql."
+            )
+        return value
+
     try:
         tables = [r["TABLE_NAME"] for r in db.rows(
             conn,
@@ -81,6 +101,7 @@ def make_copy(src: str, dst: str, *, conn) -> None:
         )]
         for view in views:
             ddl = db.rows(conn, f"SHOW CREATE VIEW `{src}`.`{view}`")[0]["Create View"]
+            ddl = ddl_or_stop(ddl, kind="представление", name=view)
             db.execute(conn, _strip_definer(requalify(ddl)))
 
         routines = db.rows(
@@ -91,9 +112,11 @@ def make_copy(src: str, dst: str, *, conn) -> None:
         )
         for routine in routines:
             kind = routine["ROUTINE_TYPE"]  # 'PROCEDURE' | 'FUNCTION'
-            row = db.rows(conn, f"SHOW CREATE {kind} `{src}`.`{routine['ROUTINE_NAME']}`")[0]
+            name = routine["ROUTINE_NAME"]
+            row = db.rows(conn, f"SHOW CREATE {kind} `{src}`.`{name}`")[0]
             ddl_key = next(k for k in row if k.startswith("Create "))
-            db.execute(conn, _strip_definer(requalify(row[ddl_key])))
+            ddl = ddl_or_stop(row[ddl_key], kind=kind.lower(), name=name)
+            db.execute(conn, _strip_definer(requalify(ddl)))
 
         triggers = [r["TRIGGER_NAME"] for r in db.rows(
             conn,
@@ -103,6 +126,7 @@ def make_copy(src: str, dst: str, *, conn) -> None:
         )]
         for trigger in triggers:
             ddl = db.rows(conn, f"SHOW CREATE TRIGGER `{src}`.`{trigger}`")[0]["SQL Original Statement"]
+            ddl = ddl_or_stop(ddl, kind="триггер", name=trigger)
             db.execute(conn, _strip_definer(requalify(ddl)))
     finally:
         db.execute(conn, "SET SESSION FOREIGN_KEY_CHECKS=1")

@@ -75,6 +75,17 @@ class PubCompositionChanged(GateFailed):
     """ПУБ-2: состав класса ПУБ шире или уже решения Р-56."""
 
 
+class DdlNotVisible(GateFailed):
+    """Сервер вернул тело объекта как NULL: прав на его чтение нет.
+
+    ⛔ MySQL 8.0.20+ на ``SHOW CREATE PROCEDURE``/``FUNCTION`` для программы с
+    чужим определителем отвечает НЕ отказом, а строкой с пустым телом. Молчащий
+    отказ -- худший вид отказа: копия схемы уезжала дальше и падала на
+    ``NoneType`` без единого слова о причине. Нужна глобальная привилегия
+    ``SHOW_ROUTINE`` (или совпадение определителя).
+    """
+
+
 class StandNotStrict(GateFailed):
     """sql_mode стенда без STRICT_TRANS_TABLES."""
 
