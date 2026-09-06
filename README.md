@@ -83,6 +83,9 @@ pip install -e ".[dev]"
 cp demo/sakila/.env.example demo/sakila/.env    # задать MYSQL_ROOT_PASSWORD и MYSQL_PASSWORD
 docker compose -f demo/sakila/docker-compose.yml up -d
 docker compose -f demo/sakila/docker-compose.yml ps    # дождаться healthy
+#   Стенд поднимается своим проектом compose (`sanitizer-sakila`) и своим томом:
+#   соседние контейнеры MySQL он не трогает. Снос вместе с данными —
+#   docker compose -f demo/sakila/docker-compose.yml down -v
 
 # 2. ключи инструмента — в корневой .env (в git не попадает)
 cp .env.example .env
