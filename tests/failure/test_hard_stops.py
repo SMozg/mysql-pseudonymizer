@@ -274,13 +274,19 @@ def test_collision_inside_one_answer_costs_cardinality_not_identity(conn, case_p
 
 @pytest.mark.parametrize("mode", [fakes.MODE_DROP_KEYS, fakes.MODE_DUPLICATE_KEY,
                                   fakes.MODE_ALIEN_KEY])
-def test_unmatched_element_is_refused_by_cell_not_by_batch(conn, case_pipeline, mode):
-    """Ключа нет · ключ повторён · ключ не из этой заявки -> отказ ПО СВОЕЙ ячейке.
+def test_broken_answer_costs_only_its_own_cells(conn, case_pipeline, mode):
+    """Ключа нет · ключ повторён · ключ не из этой заявки -> отказ ПО СВОЕЙ ЯЧЕЙКЕ.
 
-    Отказ по всему пакету обнулил бы 49 годных ответов из 50 и упёрся бы
-    в потолок отказов на ровном месте.
+    📌 Испытание: поставщик сбоит ОДИН раз -- так и бывает в жизни. Требование:
+    испорченный ответ стоит только своих ячеек. Отказ по всему пакету обнулил бы
+    сотни годных ответов, за которые УЖЕ ЗАПЛАЧЕНО, и упёрся бы в потолок отказов
+    на ровном месте.
+    ⛔ Это свойство спасло боевой прогон 07.09: модель вернула 562 негодных ответа
+    из 600, и 38 годных уцелели -- ушли в словарь, а не пропали вместе с пакетом.
+    ⛔ Отдельно `alien_key`: номер строки, которого в заявке НЕ БЫЛО, не смеет
+    создать запись в базе. Ответ модели не дописывает данные.
     """
-    provider = fakes.FakeModelProvider(mode=mode)
+    provider = fakes.FakeModelProvider(mode=mode, distort_budget=1)
     case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
     n = h.scalar(conn, h.q(
         "SELECT COUNT(*) n FROM {cur}.customer WHERE customer_id=999999",
@@ -289,7 +295,30 @@ def test_unmatched_element_is_refused_by_cell_not_by_batch(conn, case_pipeline, 
     left = h.scalar(conn, h.q(
         "SELECT COUNT(DISTINCT first_name) n FROM {cur}.customer",
         cur=case_pipeline.schema))
-    assert left == R.C12_DISTINCT_AFTER["customer.first_name"]
+    assert left == R.C12_DISTINCT_AFTER["customer.first_name"], (
+        "разовый сбой формы стоил больше, чем своих ячеек")
+
+
+@pytest.mark.parametrize("mode", [fakes.MODE_DROP_KEYS, fakes.MODE_DUPLICATE_KEY])
+def test_provider_broken_forever_stops_the_run_loudly(case_pipeline, mode):
+    """📌 Поставщик, сбоящий ВСЕГДА, обязан остановить прогон -- и НАЗВАТЬ причину.
+
+    Разовый сбой стоит своих ячеек (тест выше). Систематический -- другое дело:
+    повтор из тех же строк воспроизводит ту же потерю, попытки выгорают впустую,
+    и продолжать бессмысленно.
+    ⛔ Раньше этот случай ОБХОДИЛСЯ: в повторный пакет подмешивались служебные
+    строки-заглушки, и сломанный поставщик проскальзывал незамеченным. Владелец
+    снял заглушки 07.09 -- они уходили в запрос к настоящей модели, и та на них
+    отвечала. Обход заменён на честную остановку.
+    ⛔ Тест требует ДВУХ вещей: остановка наступила И в её тексте названа причина.
+    Молча вставший прогон -- та же болезнь, что молча зелёная проверка.
+    """
+    provider = fakes.FakeModelProvider(mode=mode)          # distort_budget=0 -- всегда
+    with pytest.raises(errors.RetriesExhausted) as stop:
+        case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
+    text = str(stop.value)
+    assert "кандидатов" in text, f"остановка не назвала причину: {text}"
+    assert "потолок" in text, f"остановка не назвала, что именно исчерпано: {text}"
 
 
 # --- потолок отказов --------------------------------------------------------

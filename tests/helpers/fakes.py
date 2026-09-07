@@ -93,6 +93,9 @@ class FakeModelProvider:
     universe_bait: tuple = ("ADAM", "Ontario", "Kanagawa")  # ловушки макетов #3 и #4
     refuse_budget: int = 0            # сколько первых элементов испортить (потолок 138)
     bad_answer_budget: int = 2        # ⛔ сколько ПЕРВЫХ ячеек портят режимы *_ONCE (см. ниже)
+    #: 📌 Сколько ПЕРВЫХ ответов испортить по форме (потерянные/повторённые/чужие
+    #: ключи). 0 -- портить всегда. См. `_distort`.
+    distort_budget: int = 0
     calls: list = field(default_factory=list)
     asked: Counter = field(default_factory=Counter)
     issued: dict = field(default_factory=dict)
@@ -102,6 +105,7 @@ class FakeModelProvider:
     # `refuse_budget` элементов КАЖДОГО пакета (до 57x перерасход). Не параметр
     # конструктора -- испытание задаёт только `refuse_budget`.
     _refused_used: int = field(default=0, init=False, repr=False)
+    _distorted_used: int = field(default=0, init=False, repr=False)
     # ⛔ Настройка двойника, не код: режимы `*_ONCE` держали «первая попытка»
     # (`item.attempt == 0`) БЕЗ ограничения числа ЯЧЕЕК -- первая попытка верна
     # для КАЖДОЙ из 2771 ячейки, значит плохой ответ уходил на ВСЕ 2771, все
@@ -228,6 +232,21 @@ class FakeModelProvider:
         return value[:limit]
 
     def _distort(self, batch, items: list) -> list:
+        """Порча ФОРМЫ ответа: потерянные, повторённые и чужие ключи.
+
+        📌 `distort_budget` (07.09): сколько ПЕРВЫХ ответов испортить. Ноль --
+        портить всегда, как было. Различение нужно потому, что это два разных
+        испытания: поставщик, сбойнувший ОДИН раз (так бывает в жизни), и
+        поставщик, сбоящий ВСЕГДА (так бывает при поломке). Первый обязан
+        стоить только своих ячеек, второй -- обязан остановить прогон громко.
+        ⛔ Раньше их различали заглушки по краям пакета, но они уходили в
+        запрос к настоящей модели, и владелец их снял. Различение переехало
+        сюда, в двойника, где ему и место.
+        """
+        if self.distort_budget:
+            if self._distorted_used >= self.distort_budget:
+                return items
+            self._distorted_used += 1
         if self.mode == MODE_DROP_KEYS:
             return items[: max(0, len(items) - 2)]
         if self.mode == MODE_SHUFFLE:
