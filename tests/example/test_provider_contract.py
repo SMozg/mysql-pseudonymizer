@@ -453,3 +453,49 @@ def test_every_call_is_recorded_before_the_answer_is_parsed(monkeypatch, config,
     assert "Probe Original Value" in records[-1]["запрос"], "запрос сохранён не целиком"
     assert b"Probe Original Value" not in path.read_bytes(), (
         "исходное значение лежит в файле ОТКРЫТЫМ ТЕКСТОМ -- журнал не зашифрован")
+
+
+# --- страновой якорь на строке (идея владельца 07.09) -----------------------
+
+
+def _prompt_for(cls: str, country: str | None):
+    from sanitizer.models import Batch
+    from sanitizer.providers.model import ModelProvider
+
+    items = tuple(
+        RequestItem(key=("customer", (i,), "col"), attempt=0, value_class=cls,
+                    old_value=v, length_limit=45,
+                    fmt=({"country_id": 7, "country": country} if country else {}))
+        for i, v in enumerate(("MARY", "PATRICIA"), 1)
+    )
+    return ModelProvider._prompt(Batch(value_class=cls, items=items,
+                                       taken=frozenset(), seed=1))
+
+
+def test_a_person_line_carries_its_own_country_anchor():
+    """📌 У КАЖДОЙ строки имени свой якорь — страна, как давно было у города.
+
+    ⛔ Замер прогона 07.09: с тегом страны модель отдала 422 РАЗНЫХ города из 600,
+    без тега — 47 разных имён на 591 строку. Пакет один и тот же: дело не в его
+    размере, а в том, думает ли модель про строку или про класс.
+    """
+    text = _prompt_for("КЗ-1", "Japan")
+    assert "country:Japan" in text, "тег страны не доехал до строки запроса"
+    assert "REAL first name commonly used in that country" in text, (
+        "строка требования к имени не появилась — тег без требования бесполезен")
+
+
+def test_a_city_line_keeps_its_own_wording():
+    """⛔ У города требование ДРУГОЕ (Р-1: реальный город той же страны) и оно не
+    должно подмениться общей формулировкой для человека."""
+    text = _prompt_for("КЗ-3", "Japan")
+    assert "REAL city of the same country" in text
+    assert "first name" not in text
+
+
+def test_without_a_country_the_line_stays_as_it_was():
+    """Чужая база может не иметь справочника стран — запрос обязан работать и так."""
+    text = _prompt_for("КЗ-1", None)
+    assert "country:" not in text
+    assert "commonly used in that country" not in text
+    assert "Find replacements for first name" in text

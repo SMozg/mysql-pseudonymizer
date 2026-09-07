@@ -166,6 +166,9 @@ class Dictionary:
         #: относится к неприкасаемому классу (Н), персональными данными не является
         #: и в базе публикуется как есть, поэтому передавать её можно.
         self._countries: dict = {}
+        #: (класс, нормализованное значение) -> country_id. ⛔ ПОДСКАЗКА поставщику,
+        #: НЕ часть ключа словаря: охват замены остаётся классом (Р-45 А).
+        self._country_hints: dict = {}
         self._seen_old: dict = {}  # (cls, norm_old) -> set(scope_repr) -- бухгалтерия разрывов
         # ⛔ Ревизия, дефект 2: потолок повторов -- ПО ЗНАЧЕНИЮ (§4 ПРАВИЛА-ОТКАЗ.md),
         # а не по ячейке. У классов "по ячейке" (КЗ-6..КЗ-8, реюза замены НЕТ --
@@ -463,9 +466,23 @@ class Dictionary:
             return (head,) + tuple(scope[1:])
         return _norm(scope) if isinstance(scope, str) else scope
 
+    def set_country_hints(self, hints: Mapping) -> None:
+        """Страновые подсказки для классов человека (КЗ-1/КЗ-2) -- см. `_country_hints`
+        в раннере. Ключ словаря они НЕ трогают."""
+        self._country_hints = dict(hints or {})
+
     def _fmt_for(self, cls: str, it: Mapping) -> dict:
         if cls in ("КЗ-6", "КЗ-7"):
             return {"digits_only": True, "length": len(it["current"])}
+        if cls in ("КЗ-1", "КЗ-2"):
+            cid = self._country_hints.get((cls, it["eff_scope"]))
+            if cid is None:
+                return {}
+            fmt = {"country_id": cid}
+            name = self._countries.get(cid)
+            if name:
+                fmt["country"] = name
+            return fmt
         if cls == "КЗ-3" and isinstance(it["eff_scope"], tuple) and len(it["eff_scope"]) == 2:
             country_id = it["eff_scope"][1]
             fmt = {"country_id": country_id}

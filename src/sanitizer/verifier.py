@@ -339,10 +339,12 @@ class Verifier:
             counters = self.runlog.counters()
             counters_rows = tuple(_Row(name, "-", value, "P") for name, value in counters.items())
             spend_row = (
-                f"вызовов: {counters.get('calls', 0)}, принято: {counters.get('accepted', 0)}, "
+                f"обращений к поставщикам: {counters.get('calls', 0)} "
+                f"(⛔ ВКЛЮЧАЯ локальные -- генератор индексов и нетекстовые классы; "
+                f"сетевых вызовов к модели меньше, их число и токены -- `sanitizer calls`), "
+                f"принято: {counters.get('accepted', 0)}, "
                 f"повторных попыток: {counters.get('refused', 0)} "
-                f"(Р-120: цена прогона, а не брак -- гейтом идут значения без замены), "
-                f"токены: — (прочерк, поставщик их не считает)"
+                f"(Р-120: цена прогона, а не брак -- гейтом идут значения без замены)"
             )
 
             declared = any(e.event == "declaration" for e in getattr(self.runlog, "entries", ()))

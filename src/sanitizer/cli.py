@@ -309,6 +309,20 @@ def _verify(cfg: Config, *, twin: bool = False) -> int:
     verifier = _build_verifier(cfg, twin_runs=pair)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
+    # ⛔ Находка судьи 07.09: `verify` выходил кодом 1, не напечатав НИ СТРОКИ.
+    # Красный код без текста читается как поломка инструмента, а не как провал
+    # критерия, -- и заставляет лезть в файл, чтобы узнать хотя бы, что случилось.
+    # ⛔ Печатаем НОМЕР и НАЗВАНИЕ, но не `fact`: в факте критерия могут стоять
+    # значения из базы (критерий 23 гейтит именно отсутствие ПД в выводе).
+    failed = [r for r in report.results if r.verdict != "P"]
+    print(
+        f"приёмка: P {len(report.results) - len(failed)} из {len(report.results)}"
+        f"{', провалов ' + str(len(failed)) if failed else ''} "
+        f"-> {cfg.paths.report}",
+        file=sys.stderr,
+    )
+    for r in failed:
+        print(f"  F критерий {r.number}: {r.title}", file=sys.stderr)
     return EXIT_OK if report.green else EXIT_RED_ACCEPTANCE
 
 

@@ -40,7 +40,7 @@ from typing import Mapping, Optional
 from . import db, providers as providers_mod, stand
 from .applier import Applier
 from .derived import DerivedBuilder
-from .dictionary import Dictionary
+from .dictionary import Dictionary, _norm as _norm_hint
 from .errors import (
     AlreadySanitized,
     DeclarationMissing,
@@ -311,6 +311,8 @@ class Runner:
                 )
 
             dictionary.snap_originals(cfg.stand.work_schema, field_map, conn=conn)
+            dictionary.set_country_hints(
+                self._country_hints(field_map, cfg.stand.work_schema, conn))
             self.runlog.log("info", "declaration", {"value": rule.declaration})
 
             plan = self._traversal(field_map, cfg.stand.work_schema, conn)
@@ -488,6 +490,59 @@ class Runner:
                         cell = (table, pk, r.column)
                         plan.append((r.value_class, cell, row[r.column], None))
         return plan
+
+    #: Откуда у ЧЕЛОВЕКА берётся страна: таблица -> внешний ключ на адрес.
+    _PERSON_TABLES = {"customer": "address_id", "staff": "address_id"}
+
+    def _country_hints(self, field_map, schema: str, conn) -> dict:
+        """Страна человека для КЗ-1/КЗ-2 -- ПОДСКАЗКА поставщику, не ключ словаря.
+
+        📌 Идея владельца 07.09. Замер прогона судьи: у города в каждой строке
+        запроса стоит тег страны, и модель отдаёт 422 РАЗНЫХ города из 600. У имени
+        тега нет -- и та же модель на 591 строку отвечает словарём из 47 имён.
+        Разница не в размере пакета (пакет один и тот же), а в том, есть ли у строки
+        СВОЙ якорь: с якорем модель думает про каждую строку, без якоря -- про класс.
+
+        ⛔ ЧТО ЭТО НЕ ЗНАЧИТ. Тег НЕ входит в ключ словаря: охват замены остаётся
+        классом (Р-45 А), тёзки по-прежнему получают одну замену. Значит про клиента
+        из другой страны с тем же именем тег скажет неправду. Это осознанная цена:
+        имён 591 на 599 клиентов, то есть почти каждое имя встречается ровно раз, и
+        тег для него ТОЧЕН. Заявлять «имя правдоподобно для страны клиента» нельзя --
+        заявляем ровно то, что делаем: разнообразие берётся из страновой рамки.
+        ⛔ При повторе имени берётся МИНИМАЛЬНЫЙ country_id: прогон обязан быть
+        воспроизводимым (критерий 21), а «первый попавшийся» зависит от порядка строк.
+        """
+        wanted = {}
+        for r in field_map.rules:
+            if r.field_class == "П" and r.value_class in ("КЗ-1", "КЗ-2") \
+                    and r.table in self._PERSON_TABLES:
+                wanted.setdefault(r.table, []).append(r)
+        hints: dict = {}
+        for table, rules in sorted(wanted.items()):
+            fk = self._PERSON_TABLES[table]
+            cols = ", ".join(f"t.`{r.column}`" for r in rules)
+            try:
+                rows = db.rows(conn, (
+                    f"SELECT {cols}, ci.`country_id` AS country_id "
+                    f"FROM `{schema}`.`{table}` t "
+                    f"JOIN `{schema}`.`address` a ON a.`address_id` = t.`{fk}` "
+                    f"JOIN `{schema}`.`city` ci ON ci.`city_id` = a.`city_id`"
+                ))
+            except Exception:  # noqa: BLE001 -- подсказка не обязательна, чужая база может быть иной
+                continue
+            for row in rows:
+                cid = row["country_id"]
+                if cid is None:
+                    continue
+                for r in rules:
+                    val = row[r.column]
+                    if not isinstance(val, str) or not val:
+                        continue
+                    key = (r.value_class, _norm_hint(val))
+                    prev = hints.get(key)
+                    if prev is None or cid < prev:
+                        hints[key] = cid
+        return hints
 
     @staticmethod
     def _accepted_by_class(plan: list) -> dict:

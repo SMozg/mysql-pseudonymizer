@@ -398,13 +398,26 @@ class ModelProvider:
         has_country = any(
             (item.fmt.get("country_id") if item.fmt else None) is not None for item in batch.items
         )
-        if has_country:
+        if has_country and batch.value_class == "КЗ-3":
             # ⛔ Р-1: замена для города -- РЕАЛЬНЫЙ город ТОЙ ЖЕ страны. Единственное
             # место, где у модели просят знание о мире, а не правдоподобие.
             lines.append(
                 "Each line has a country tag: the replacement must be a REAL city of the "
                 "same country as the original city of that line; lines with the same tag "
                 "must stay in the same country."
+            )
+        elif has_country:
+            # 📌 Тот же приём перенесён с города на человека (идея владельца 07.09).
+            # Замер: с тегом страны модель отдаёт 422 РАЗНЫХ города из 600, без тега --
+            # 47 разных имён на 591 строку. Якорь на строке заставляет думать построчно.
+            # ⛔ Решение владельца 07.09: строки «lines with different tags must not get
+            # the same replacement» здесь НЕТ. Она повторяла другими словами уже сказанное
+            # («all replacements should be different from each other») -- повтор требования
+            # не усиливает его, а даёт модели лишнюю работу на разбор. Тот же урок, что
+            # `must` против `should` (Р-118).
+            lines.append(
+                f"Each line has a country tag: the replacement must be a REAL {what} "
+                f"commonly used in that country."
             )
 
         lines += [

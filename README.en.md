@@ -5,7 +5,7 @@
 [![tests](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml/badge.svg)](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml)
 [![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
-[![tests 167/167](https://img.shields.io/badge/tests-167%2F167-brightgreen.svg)](tests)
+[![tests 170/170](https://img.shields.io/badge/tests-170%2F170-brightgreen.svg)](tests)
 
 In goes a working MySQL database, out comes the same one: same schema, same row count, same
 relations — without personal data. Replacements are meaningful, not `xxxxx`, and reversible
@@ -98,7 +98,10 @@ docker compose -f demo/sakila/docker-compose.yml ps    # wait for healthy
 
 # 2. tool keys — into the root .env (never committed)
 cp .env.example .env
-python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
+#   Fill the values in .env. Generate the dictionary key and WRITE IT INTO the empty
+#   SANIT_KEY= line — do not append it to the end of the file: two lines with the same
+#   name confuse the reader (the last one wins).
+python -c "import secrets; print(secrets.token_hex(32))" 
 #   SANIT_KEY is a hex string; it encrypts the replacement dictionary.
 #   SANIT_MODEL_KEY goes into the same file: without it first names, last names and
 #   cities cannot be replaced (classes КЗ-1…КЗ-3 go through the model).
@@ -108,9 +111,12 @@ python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
 #    does not exist at all on a clean Ubuntu.
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
-#   `run` is SILENT and long (10–20 minutes: it waits for the model). Signs of life,
-#   in another window: `tail -f runlog/run.runlog` and `python -m sanitizer calls --last 5`
-#   (calls, tokens, timing; without --raw no values are printed — requests carry PD).
+#   `run` is SILENT (measured on the demo stand: 4.5 minutes, 4 of them waiting for
+#   the model). There is EXACTLY ONE sign of life, in another window:
+#       python -m sanitizer calls --config config/config.yaml --last 5
+#   The call log is appended as the run goes. `runlog/` does not exist yet at that
+#   point — it appears at the end, so it cannot be followed. Without --raw no values
+#   are printed: requests to the model carry the original data.
 python -m sanitizer verify  --config config/config.yaml
 #   verify OVERWRITES report/ОТЧЕТ-ПРИЕМКИ.md. The report shipped in the repository is
 #   the AUTHOR'S run, offered as evidence; your own run takes its place.
@@ -127,7 +133,7 @@ and a variable already set outside wins over the file. Port and user live in a s
 variable stops the run at the pre-flight gate naming it, instead of a connection refusal with
 no reason.
 
-Tests use the same stand: `pytest` (167 tests, 10–20 minutes — they run real sanitisation
+Tests use the same stand: `pytest` (170 tests, about 10 minutes — they run real sanitisation
 passes over copies of the database, not stubs).
 
 `config/config.yaml` targets the demo stand; for your own database use `config/config.example.yaml`
@@ -144,7 +150,7 @@ live in the environment, never in the config — see `.env.example`.
 
 | stop | what happened | what to do |
 |---|---|---|
-| `значений без замены` (code 2) | the dictionary is incomplete, nothing to apply | `calls --last 5` shows the last calls; fix model access and run again |
+| `значений без замены` (code 2) | the dictionary is incomplete, nothing to apply | `python -m sanitizer calls --config config/config.yaml --last 5` shows the last calls; fix model access and run again |
 | `RetriesExhausted` (code 2) | one value exhausted every attempt | the stop names the cell and how many candidates arrived: raise `retry_limit` or relax the column length |
 | gate failed (code 3) | a variable, a grant or a stand condition is missing | the stop names WHAT is missing — fill it in and repeat |
 | red acceptance (code 1) | the run finished but a criterion failed | `report/ОТЧЕТ-ПРИЕМКИ.md` names the failing criterion |
@@ -162,7 +168,7 @@ separate line in the report. Only a value left WITHOUT a replacement kills the r
 | | |
 |---|---|
 | acceptance criteria | **29 of 30 pass** |
-| tests | **167 of 167** |
+| tests | **170 of 170** |
 | reversibility | **5267 of 5267 cells**, 0 unrecoverable, matched the BEFORE snapshot |
 | volume | 47,268 rows before and after |
 | relations | 22 foreign keys resolve, 0 orphans |
@@ -189,7 +195,7 @@ Pseudonymization protects by breaking the link "this row ↔ this person".
 `POINT(129.72 33.15) → POINT(135.94 27.86)` is Japan by the box, but a point can land in the sea
 offshore. An outline instead of a box is named, not done.
 
-**Collisions with other rows' values remain and are published as a number** — 373 in the demo run.
+**Collisions with other rows' values remain and are published as a number** — 1307 in the demo run (criterion 1c).
 Diagnostics, not a failure: `MIKE` next to another customer says nothing about the first.
 
 **The model sees source values** — no other way to get a real city of the same country. For
