@@ -147,3 +147,85 @@ def test_names_keep_the_same_guarantees_as_surnames():
     for key, value in got.items():
         assert value != orig[key]
         assert len(value) == len(orig[key])
+
+
+# --- город: группа СТРАНОВАЯ, а не по длине (Р-128) -------------------------
+
+
+def _city_batch(pairs, seed=7):
+    """pairs -- (город, country_id). Страна приходит в `fmt`, как её кладёт охват."""
+    items = tuple(
+        RequestItem(key=("city", (i,), "city"), attempt=0, value_class="КЗ-3",
+                    old_value=city, length_limit=50,
+                    fmt={"country_id": cid, "country": f"страна-{cid}"})
+        for i, (city, cid) in enumerate(pairs, 1)
+    )
+    return Batch(value_class="КЗ-3", items=items, taken=frozenset(), seed=seed)
+
+
+def test_a_city_is_replaced_by_a_city_of_the_same_country():
+    """⛔ Р-1: замена -- НАСТОЯЩИЙ город ТОЙ ЖЕ страны. Перестановка внутри
+    страновой группы выполняет это ПО ПОСТРОЕНИЮ, а не вероятностно, как модель."""
+    pairs = [("Toronto", 20), ("Calgary", 20), ("Halifax", 20),
+             ("Osaka", 50), ("Kobe", 50), ("Nagoya", 50)]
+    home = {city: cid for city, cid in pairs}
+    b = _city_batch(pairs)
+    for key, value in _first(ShuffleProvider(1).supply(b)).items():
+        idx = key[1][0] - 1
+        assert home[value] == pairs[idx][1], (
+            f"{pairs[idx][0]} ({pairs[idx][1]}) -> {value} ({home[value]}): страна сменилась")
+
+
+def test_namesake_cities_of_different_countries_never_swap():
+    """📌 Два London -- в РАЗНЫХ группах, встретиться не могут. Заявленный разрыв
+    сквозной замены (Р-45) держится построением, а не оговоркой в отчёте."""
+    pairs = [("London", 20), ("Toronto", 20), ("London", 102), ("Dundee", 102)]
+    # ⛔ Порядок ответа -- по группам, не по входу: сверяем ПО КЛЮЧУ ячейки,
+    # как это делает и сам конвейер (сопоставление по ключу -- КОНТРАКТ §5).
+    got = {key[1][0]: value
+           for key, value in _first(ShuffleProvider(1).supply(_city_batch(pairs))).items()}
+    assert got == {1: "Toronto", 2: "London", 3: "Dundee", 4: "London"}, got
+    # ⛔ ДВА London в ответе -- это НЕ склейка, а сохранённое свойство базы: один
+    # канадский, другой британский, и в словаре они разные записи (охват значения --
+    # пара «город, страна», Р-45 А). Проверять надо другое: сами одноимённые города
+    # получили РАЗНЫЕ замены, каждый внутри своей страны.
+    assert got[1] != got[3], "одноимённые города разных стран получили одну замену"
+
+
+def test_a_country_with_a_single_city_goes_to_the_spare_provider():
+    """⛔ 42 страны в демо-базе представлены ЕДИНСТВЕННЫМ городом -- переставлять
+    не с чем, и это ровно тот случай, где ответа ВНУТРИ ДАННЫХ нет. Такие значения
+    уходят модели: она знает мир, а перестановка знает только базу."""
+
+    class Spare:
+        name = "spare"
+        handles = frozenset({"КЗ-3"})
+
+        def __init__(self):
+            self.asked = []
+
+        def supply(self, batch):
+            from sanitizer.models import ProviderResponse, ResponseItem, Usage
+            self.asked = [it.old_value for it in batch.items]
+            return ProviderResponse(
+                items=tuple(ResponseItem(key=it.key, new_value=("ЗАПАСНОЕ",))
+                            for it in batch.items),
+                usage=Usage(calls=1, values=len(batch.items), refusals=0, tokens=None))
+
+    spare = Spare()
+    pairs = [("Toronto", 20), ("Calgary", 20), ("Reykjavik", 81)]
+    resp = ShuffleProvider(1, fallback=spare).supply(_city_batch(pairs))
+    assert spare.asked == ["Reykjavik"], f"запасному ушло не то: {spare.asked}"
+    assert len(resp.items) == 3
+
+
+def test_a_city_without_a_country_is_not_moved_into_a_foreign_one():
+    """⛔ Нет страны в `fmt` -- значит группы нет: значение уходит запасному, а не
+    в чужую страну. Тихая подстановка города другой страны нарушила бы Р-1 молча."""
+    items = tuple(
+        RequestItem(key=("city", (i,), "city"), attempt=0, value_class="КЗ-3",
+                    old_value=city, length_limit=50, fmt={})
+        for i, city in enumerate(("Toronto", "Calgary"), 1)
+    )
+    b = Batch(value_class="КЗ-3", items=items, taken=frozenset(), seed=1)
+    assert ShuffleProvider(1).supply(b).items == ()

@@ -344,6 +344,17 @@ def _report(cfg: Config, *, want_pdf: bool) -> int:
     verifier = _build_verifier(cfg)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
+    # ⛔ Находка судьи 07.09: команда пересобирала отчёт верно и МОЛЧАЛА, возвращая 1.
+    # Молчаливый ненулевой код читается как поломка инструмента, а не как красный
+    # критерий. Печатаем то же, что и `verify`: сколько P и какие именно F.
+    failed = [r for r in report.results if r.verdict != "P"]
+    print(
+        f"отчёт пересобран: P {len(report.results) - len(failed)} из {len(report.results)}"
+        f"{', провалов ' + str(len(failed)) if failed else ''} -> {cfg.paths.report}",
+        file=sys.stderr,
+    )
+    for r in failed:
+        print(f"  F критерий {r.number}: {r.title}", file=sys.stderr)
     if want_pdf:
         # ⛔ Честно, не «заглушка»: сборка PDF в эту волну не входит (её нет
         # нигде в репозитории), markdown при этом всё равно пишется -- не

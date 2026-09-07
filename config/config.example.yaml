@@ -36,7 +36,7 @@ providers:
   # "shuffle" -- перестановка значений класса местами, остаток уходит модели (Р-123).
   "КЗ-1": shuffle
   "КЗ-2": shuffle
-  "КЗ-3": model
+  "КЗ-3": shuffle
   "КЗ-4": generator
   "КЗ-5": generator
   "КЗ-6": nontext

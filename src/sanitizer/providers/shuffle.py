@@ -10,7 +10,7 @@ I recommend using a programmatic approach with a name database". Для срав
 на именах она даёт 952 новых -- потому имена и лечатся моделью, а фамилии нет.
 
 ⛔ ЧТО ДЕЛАЕТ. Меняет значения класса МЕСТАМИ: перестановка без неподвижных
-точек внутри группы одной длины. Приём известный -- data swapping из
+точек внутри группы. Группа у человека -- одна длина, у города -- одна страна. Приём известный -- data swapping из
 статистического раскрытия данных. Он даёт то, чего модель дать не может:
     · разнообразие 100 % ПО ПОСТРОЕНИЮ -- сколько различных было, столько и стало;
     · распределение длин совпадает с исходным до буквы;
@@ -37,7 +37,7 @@ from collections import defaultdict
 
 from ..models import ProviderResponse, ResponseItem, Usage
 
-DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2"})
+DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2", "КЗ-3"})
 
 #: ⛔ НАПРАВЛЕНИЕ КРУГА -- РАЗНОЕ У ИМЕНИ И ФАМИЛИИ (решение владельца 07.09).
 #: Если крутить оба класса одинаково, имя человека и его фамилия уезжают к
@@ -52,7 +52,16 @@ DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2"})
 #: сдвига «чтобы всегда отличалось» сделала бы поведение непредсказуемым для
 #: читателя кода, а цена случая -- та же вероятность омонима. Случай закреплён
 #: тестом `test_direction_does_nothing_when_the_shift_is_half_the_group`.
-_DIRECTION = {"КЗ-1": -1, "КЗ-2": +1}
+_DIRECTION = {"КЗ-1": -1, "КЗ-2": +1, "КЗ-3": +1}
+
+#: ⛔ ЧЕМ ГРУППИРОВАТЬ ЗНАЧЕНИЯ ПЕРЕД СДВИГОМ -- РАЗНОЕ У ЧЕЛОВЕКА И У ГОРОДА.
+#: Человеку группа задана ДЛИНОЙ: замена обязана уместиться в колонку и не выглядеть
+#: чужеродно. Городу -- СТРАНОЙ: требование Р-1 «замена есть настоящий город ТОЙ ЖЕ
+#: страны» сильнее любой длины (самое длинное название 26 символов при лимите 50,
+#: длина не решает ничего). 📌 Побочно это разводит одноимённые города разных стран
+#: само собой: два London лежат в РАЗНЫХ группах и встретиться не могут -- заявленный
+#: разрыв сквозной замены (Р-45) держится построением, а не оговоркой.
+_GROUP_BY_COUNTRY = frozenset({"КЗ-3"})
 
 #: Сколько вариантов предлагать на строку: разные сдвиги той же группы. Лестница
 #: предпочтений (блок Г) возьмёт первый свободный -- при перестановке свободен
@@ -72,9 +81,19 @@ class ShuffleProvider:
         self.fallback = fallback
 
     def supply(self, batch) -> ProviderResponse:
-        by_len = defaultdict(list)
+        by_country = batch.value_class in _GROUP_BY_COUNTRY
+        groups = defaultdict(list)
         for item in batch.items:
-            by_len[len(str(item.old_value))].append(item)
+            if by_country:
+                # ⛔ Страна берётся из `fmt` -- её кладёт туда охват значения (Р-45 А:
+                # охват города это пара «город, страна»). Нет страны -- нет группы:
+                # значение уходит запасному поставщику, а не в чужую страну.
+                key = (item.fmt or {}).get("country_id")
+                if key is None:
+                    key = ("нет страны", id(item))
+            else:
+                key = len(str(item.old_value))
+            groups[key].append(item)
 
         answers = []
         orphans = []
@@ -82,8 +101,8 @@ class ShuffleProvider:
         if seed is None:
             seed = self.seed
         direction = _DIRECTION.get(batch.value_class, +1)
-        for length in sorted(by_len):
-            group = by_len[length]
+        for key in sorted(groups, key=lambda k: str(k)):
+            group = groups[key]
             if len(group) < 2:
                 orphans.extend(group)
                 continue
