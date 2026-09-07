@@ -19,6 +19,7 @@ from ..models import ProviderResponse
 from .generator import DeterministicProvider
 from .model import ModelProvider
 from .nontext import NonTextProvider
+from .shuffle import ShuffleProvider
 
 
 @runtime_checkable
@@ -41,6 +42,12 @@ _FACTORIES = {
     "model": lambda cfg, handles: ModelProvider(cfg, handles=handles),
     "generator": lambda cfg, handles: DeterministicProvider(cfg.run.seed, handles=handles),
     "nontext": lambda cfg, handles: NonTextProvider(cfg.run.seed, frames=(), handles=handles),
+    # ⛔ Р-123: перестановка обслуживает класс сама, а ОСТАТОК (значение без пары
+    # той же длины) отдаёт модели -- поэтому запасной поставщик собирается здесь
+    # же и теми же руками. Отдельной строки в конфиге он не требует: это не выбор
+    # пользователя, а устройство поставщика.
+    "shuffle": lambda cfg, handles: ShuffleProvider(
+        cfg.run.seed, handles=handles, fallback=ModelProvider(cfg, handles=handles)),
 }
 
 

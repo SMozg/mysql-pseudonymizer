@@ -5,7 +5,7 @@
 [![tests](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml/badge.svg)](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml)
 [![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
-[![tests 170/170](https://img.shields.io/badge/tests-170%2F170-brightgreen.svg)](tests)
+[![tests 182/182](https://img.shields.io/badge/tests-182%2F182-brightgreen.svg)](tests)
 
 In goes a working MySQL database, out comes the same one: same schema, same row count, same
 relations — without personal data. Replacements are meaningful, not `xxxxx`, and reversible
@@ -133,7 +133,7 @@ and a variable already set outside wins over the file. Port and user live in a s
 variable stops the run at the pre-flight gate naming it, instead of a connection refusal with
 no reason.
 
-Tests use the same stand: `pytest` (170 tests, about 10 minutes — they run real sanitisation
+Tests use the same stand: `pytest` (182 tests, about 10 minutes — they run real sanitisation
 passes over copies of the database, not stubs).
 
 `config/config.yaml` targets the demo stand; for your own database use `config/config.example.yaml`
@@ -168,7 +168,7 @@ separate line in the report. Only a value left WITHOUT a replacement kills the r
 | | |
 |---|---|
 | acceptance criteria | **29 of 30 pass** |
-| tests | **170 of 170** |
+| tests | **182 of 182** |
 | reversibility | **5267 of 5267 cells**, 0 unrecoverable, matched the BEFORE snapshot |
 | volume | 47,268 rows before and after |
 | relations | 22 foreign keys resolve, 0 orphans |
