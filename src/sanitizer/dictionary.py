@@ -161,6 +161,11 @@ class Dictionary:
         #: 📌 Р-117: не провал, а число для критерия 26 -- мера того, насколько
         #: исчерпался пул поставщика.
         self._merges: dict = {}
+        #: country_id -> НАЗВАНИЕ страны. 📌 Модели уходит название, а не число:
+        #: `country:82` для неё загадка, `country:Saudi Arabia` -- факт. Страна
+        #: относится к неприкасаемому классу (Н), персональными данными не является
+        #: и в базе публикуется как есть, поэтому передавать её можно.
+        self._countries: dict = {}
         self._seen_old: dict = {}  # (cls, norm_old) -> set(scope_repr) -- бухгалтерия разрывов
         # ⛔ Ревизия, дефект 2: потолок повторов -- ПО ЗНАЧЕНИЮ (§4 ПРАВИЛА-ОТКАЗ.md),
         # а не по ячейке. У классов "по ячейке" (КЗ-6..КЗ-8, реюза замены НЕТ --
@@ -281,11 +286,25 @@ class Dictionary:
         одного источника), поэтому переключение безопасно для исправных сценариев.
         """
         self.fmap = fmap
-        if self.originals is not None:
-            return self.originals
         source_schema = schema
         if self.passport is not None and getattr(self.passport, "ref_schema", None):
             source_schema = self.passport.ref_schema
+        # 📌 Справочник стран грузится ДО раннего возврата: на продолжении прогона
+        # универсум читается из файла, а названия стран в файле не хранятся --
+        # без этого повторный прогон отдавал бы модели голые числа.
+        # ⛔ Отсутствие таблицы не ошибка: у чужой базы её может не быть, и тогда
+        # в запрос уходит числовая метка -- хуже, но работает.
+        if not self._countries:
+            try:
+                self._countries = {
+                    r["country_id"]: r["country"]
+                    for r in db.rows(conn, f"SELECT country_id, country FROM "
+                                            f"`{source_schema}`.`country`")
+                }
+            except Exception:  # noqa: BLE001 -- причина не важна: подсказка не обязательна
+                self._countries = {}
+        if self.originals is not None:
+            return self.originals
         parts = [
             f"SELECT `{col}` v FROM `{source_schema}`.`{table}` "
             f"WHERE `{col}` IS NOT NULL AND `{col}`<>''"
@@ -449,7 +468,12 @@ class Dictionary:
         if cls in ("КЗ-6", "КЗ-7"):
             return {"digits_only": True, "length": len(it["current"])}
         if cls == "КЗ-3" and isinstance(it["eff_scope"], tuple) and len(it["eff_scope"]) == 2:
-            return {"country_id": it["eff_scope"][1]}
+            country_id = it["eff_scope"][1]
+            fmt = {"country_id": country_id}
+            name = self._countries.get(country_id)
+            if name:
+                fmt["country"] = name
+            return fmt
         return {}
 
     def _resolve_class_with_retries(self, cls: str, cls_items: list, rule, providers,
