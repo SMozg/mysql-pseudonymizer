@@ -56,8 +56,8 @@ of `config/config.yaml`.
 
 | data class | provider | network | repeats by seed without the dictionary |
 |---|---|---|---|
-| first name (`КЗ-1`), city (`КЗ-3`) | language model | required | no |
-| surname (`КЗ-2`) | permutation inside the class, leftovers to the model | only for leftovers | yes |
+| city (`КЗ-3`) | language model | required | no |
+| first name (`КЗ-1`), surname (`КЗ-2`) | permutation inside the class, leftovers to the model | only for leftovers | yes |
 | district (`КЗ-4`), street address (`КЗ-5`) | deterministic generator | none | yes |
 | postal code (`КЗ-6`), phone (`КЗ-7`), coordinate (`КЗ-8`) | non-text provider | none | yes |
 
@@ -123,7 +123,7 @@ first command.
 **Keys.** The root `.env` (never committed) is about the tool itself. `SANIT_KEY` is the hex string
 from the command above; it encrypts the dictionary and the call journal. Write it into the empty
 `SANIT_KEY=` line — ⛔ do not append it to the end of the file: two lines with the same name confuse
-the reader. `SANIT_MODEL_KEY` goes into the same file: without it first names and cities cannot be
+the reader. `SANIT_MODEL_KEY` goes into the same file: without it cities cannot be
 replaced, and on surnames the leftovers of the permutation stay unanswered. `SANIT_MODEL_BASE_URL`
 is for a model behind an OpenAI-compatible gateway. The tool reads these **from the environment**;
 `.env` merely feeds it, and a variable set outside wins over the file. An unfilled variable stops the

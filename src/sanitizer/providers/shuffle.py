@@ -37,7 +37,22 @@ from collections import defaultdict
 
 from ..models import ProviderResponse, ResponseItem, Usage
 
-DEFAULT_HANDLES = frozenset({"КЗ-2"})
+DEFAULT_HANDLES = frozenset({"КЗ-1", "КЗ-2"})
+
+#: ⛔ НАПРАВЛЕНИЕ КРУГА -- РАЗНОЕ У ИМЕНИ И ФАМИЛИИ (решение владельца 07.09).
+#: Если крутить оба класса одинаково, имя человека и его фамилия уезжают к
+#: «соседу» по одному и тому же правилу -- и пара «имя + фамилия» настоящего
+#: человека воспроизводится не случайно, а СИСТЕМНО. Обратное направление снимает
+#: связку между двумя перестановками, а стоит ноль. Случайные совпадения при этом
+#: остаются (≈ одно на 599 строк) -- они признаны приемлемыми: это омоним, а не
+#: раскрытие личности, и обратное требование невыполнимо в принципе.
+#: ⛔ ЧЕСТНАЯ ОГОВОРКА: в группе ЧЁТНОГО размера при сдвиге ровно в половину
+#: «вперёд» и «назад» совпадают (idx+2 == idx-2 при n=4), и на таких группах
+#: направление связку не снимает. Оставлено как есть намеренно: подкрутка
+#: сдвига «чтобы всегда отличалось» сделала бы поведение непредсказуемым для
+#: читателя кода, а цена случая -- та же вероятность омонима. Случай закреплён
+#: тестом `test_direction_does_nothing_when_the_shift_is_half_the_group`.
+_DIRECTION = {"КЗ-1": -1, "КЗ-2": +1}
 
 #: Сколько вариантов предлагать на строку: разные сдвиги той же группы. Лестница
 #: предпочтений (блок Г) возьмёт первый свободный -- при перестановке свободен
@@ -66,12 +81,13 @@ class ShuffleProvider:
         seed = getattr(batch, "seed", None)
         if seed is None:
             seed = self.seed
+        direction = _DIRECTION.get(batch.value_class, +1)
         for length in sorted(by_len):
             group = by_len[length]
             if len(group) < 2:
                 orphans.extend(group)
                 continue
-            answers.extend(self._rotate(group, seed))
+            answers.extend(self._rotate(group, seed, direction))
 
         usage_calls, usage_tokens = 1, None
         if orphans and self.fallback is not None:
@@ -88,7 +104,7 @@ class ShuffleProvider:
         )
 
     @staticmethod
-    def _rotate(group, seed: int) -> list:
+    def _rotate(group, seed: int, direction: int = 1) -> list:
         """Сдвиг по кругу внутри группы -- перестановка БЕЗ неподвижных точек.
 
         ⛔ Порядок -- сортировка значений, а не порядок прихода: воспроизводимость
@@ -96,6 +112,9 @@ class ShuffleProvider:
         ⛔ Сдвиг НЕ нулевой по построению (1 <= shift < n), поэтому значение
         не может достаться самому себе, и жёсткая проверка «равно своему
         исходному» тут не срабатывает никогда.
+        ⛔ ``direction`` -- сторона круга: +1 фамилиям, -1 именам (см. `_DIRECTION`).
+        Направление НЕ меняет ни одного свойства перестановки -- ни отсутствия
+        неподвижных точек, ни взаимной однозначности, ни распределения длин.
         """
         ordered = sorted(group, key=lambda it: str(it.old_value))
         n = len(ordered)
@@ -106,7 +125,7 @@ class ShuffleProvider:
             for extra in range(_SHIFTS_PER_ITEM):
                 shift = base + extra
                 shift = 1 + ((shift - 1) % (n - 1))     # держим 1 <= shift < n
-                value = str(ordered[(idx + shift) % n].old_value)
+                value = str(ordered[(idx + direction * shift) % n].old_value)
                 if value not in candidates:
                     candidates.append(value)
             out.append(ResponseItem(key=item.key, new_value=tuple(candidates)))

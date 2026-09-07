@@ -14,13 +14,13 @@ from sanitizer.models import Batch, RequestItem
 from sanitizer.providers.shuffle import ShuffleProvider
 
 
-def _batch(values, seed=7):
+def _batch(values, seed=7, cls="КЗ-2"):
     items = tuple(
-        RequestItem(key=("customer", (i,), "last_name"), attempt=0, value_class="КЗ-2",
+        RequestItem(key=("customer", (i,), "last_name"), attempt=0, value_class=cls,
                     old_value=v, length_limit=14, fmt={})
         for i, v in enumerate(values, 1)
     )
-    return Batch(value_class="КЗ-2", items=items, taken=frozenset(), seed=seed)
+    return Batch(value_class=cls, items=items, taken=frozenset(), seed=seed)
 
 
 def _first(resp):
@@ -103,3 +103,47 @@ def test_without_a_spare_the_orphan_is_left_unanswered_not_silently_kept():
     orphan = next(it.key for it in b.items if it.old_value == "VU")
     assert orphan not in answered
     assert len(answered) == 2
+
+
+# --- имя и фамилия крутятся в РАЗНЫЕ стороны (Р-126) ------------------------
+
+
+def test_name_and_surname_rotate_in_opposite_directions():
+    """⛔ Решение владельца 07.09. Крути оба класса одинаково -- и имя человека
+    вместе с его фамилией уедут к «соседу» ПО ОДНОМУ ПРАВИЛУ: пара настоящего
+    человека воспроизводилась бы не случайно, а системно. Обратное направление
+    снимает связку и стоит ноль.
+    """
+    values = ("SMITH", "JONES", "BROWN", "DAVIS", "MILLS")   # пять значений одной длины
+    surnames = _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-2")))
+    names = _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-1")))
+    assert surnames != names, "оба класса крутятся одинаково -- связка не снята"
+    assert set(names.values()) == set(surnames.values()) == set(values), (
+        "перестановка обязана оставаться внутри набора значений в обе стороны")
+
+
+def test_direction_does_nothing_when_the_shift_is_half_the_group():
+    """⛔ ЧЕСТНАЯ ОГОВОРКА, а не пропущенный случай: в группе ЧЁТНОГО размера при
+    сдвиге ровно в половину «вперёд» и «назад» -- одно и то же (idx+2 == idx-2 при
+    n=4). На таких группах обратное направление связку НЕ снимает.
+
+    📌 Оставлено как есть и записано тестом, а не «починено» подкруткой: группы
+    ровно такого размера редки, цена случая -- та же вероятность омонима, что
+    признана приемлемой, а молчаливая поправка сдвига сделала бы поведение
+    непредсказуемым для того, кто читает код.
+    """
+    values = ("SMITH", "JONES", "BROWN", "DAVIS")            # ровно четыре, сдвиг 2
+    assert (_first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-1")))
+            == _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-2"))))
+
+
+def test_names_keep_the_same_guarantees_as_surnames():
+    """Разнообразие точное и неподвижных точек нет -- у ОБОИХ классов."""
+    values = ("MARY", "JOHN", "LISA", "PAUL", "ANNA", "MARK")
+    b = _batch(values, cls="КЗ-1")
+    orig = {it.key: it.old_value for it in b.items}
+    got = _first(ShuffleProvider(2).supply(b))
+    assert len(set(got.values())) == len(values)
+    for key, value in got.items():
+        assert value != orig[key]
+        assert len(value) == len(orig[key])
