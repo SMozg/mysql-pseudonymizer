@@ -195,6 +195,26 @@ class ModelProvider:
         # запасной константы здесь не нужно -- она была мертва и вводила в
         # заблуждение (ревизия, правка).
         self.model_name = cfg.run.model_name
+        #: 📌 Журнал вызовов открывается ЛЕНИВО, при первом обращении: ключ живёт
+        #: в окружении, а провайдер строится и там, где до модели дело не дойдёт.
+        self._calls = None
+
+    def _call_log(self):
+        """Журнал вызовов или заглушка, если писать нечем.
+
+        ⛔ Отсутствие ключа не отменяет прогон здесь: до модели он всё равно
+        не дойдёт (`supply` требует SANIT_MODEL_KEY), а тестам, подменяющим
+        транспорт, писать нечего. Заглушка молчит, а не падает.
+        """
+        if self._calls is None:
+            from ..calls import CallLog
+            key_hex = os.environ.get("SANIT_KEY", "")
+            try:
+                self._calls = CallLog.open(self.cfg.paths.calls_path(),
+                                            key=bytes.fromhex(key_hex))
+            except Exception:  # noqa: BLE001 -- причина не важна: журнал не цель
+                self._calls = CallLog.disabled()
+        return self._calls
 
     def supply(self, batch) -> ProviderResponse:
         key = os.environ.get("SANIT_MODEL_KEY")
@@ -238,6 +258,7 @@ class ModelProvider:
         if _SEED_ACCEPTED.get(model_name, True):
             call_kwargs["seed"] = _call_seed(batch)
 
+        started = time.monotonic()
         try:
             response = _complete(call_kwargs)
         except Exception as exc:
@@ -265,6 +286,25 @@ class ModelProvider:
                 ) from None
 
         text = response["choices"][0]["message"]["content"]
+        # 📌 ЗАПИСЬ СРАЗУ ПОСЛЕ ОТВЕТА И ДО РАЗБОРА. Ответ уже оплачен; если
+        # разбор об него споткнётся, потерять его нельзя -- иначе причина срыва
+        # угадывается по вердикту фильтра, как это и было четыре прогона подряд.
+        # 📌 `usage` приходит то ключом словаря, то атрибутом -- зависит от версии
+        # litellm и поставщика. Берём обоими способами: расход прогона -- число
+        # для отчёта, и терять его из-за формы ответа нельзя.
+        usage = response.get("usage") or getattr(response, "usage", None)
+        self._call_log().append({
+            "класс": batch.value_class,
+            "модель": model_name,
+            "seed_вызова": call_kwargs.get("seed"),
+            "ячеек_в_заявке": len(batch.items),
+            "попытки": sorted({item.attempt for item in batch.items}),
+            "задержка_с": round(time.monotonic() - started, 2),
+            "токенов_вход": getattr(usage, "prompt_tokens", None),
+            "токенов_выход": getattr(usage, "completion_tokens", None),
+            "запрос": call_kwargs["messages"][0]["content"],
+            "ответ_сырой": text,
+        })
         parsed = self._parse(text)
         items = []
         for n, item in enumerate(batch.items):

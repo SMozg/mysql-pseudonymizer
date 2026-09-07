@@ -44,7 +44,7 @@ from .models import RunRule, Snapshot
 from .runner import Runner, _RunLog, read_sanit_key
 from .verifier import Verifier
 
-COMMANDS = ("prepare", "run", "verify", "reverse", "report")
+COMMANDS = ("prepare", "run", "verify", "reverse", "report", "calls")
 
 EXIT_OK = 0
 EXIT_RED_ACCEPTANCE = 1
@@ -82,6 +82,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser("report")
     p_report.add_argument("--config", required=True)
     p_report.add_argument("--pdf", action="store_true")
+
+    # 📌 Журнал вызовов поставщика: расход и диагностика.
+    p_calls = sub.add_parser("calls")
+    p_calls.add_argument("--config", required=True)
+    p_calls.add_argument("--last", type=int, default=0,
+                         help="показать последние N вызовов подробно")
+    p_calls.add_argument("--raw", action="store_true",
+                         help="⛔ печатать ТЕКСТЫ запросов и ответов: в запросе лежат "
+                              "исходные значения, это персональные данные")
 
     return parser
 
@@ -333,6 +342,44 @@ def _report(cfg: Config, *, want_pdf: bool) -> int:
     return EXIT_OK if report.green else EXIT_RED_ACCEPTANCE
 
 
+def _calls(cfg: Config, *, last: int, raw: bool) -> int:
+    """Свод журнала вызовов: расход прогона числом и, по требованию, сами ответы.
+
+    📌 Расход перестал быть оценкой: токены каждого вызова записаны в момент
+    ответа, и «бюджет прогона» в отчёте берётся отсюда.
+    ⛔ Тексты запросов НЕ печатаются без `--raw`: запрос несёт исходные значения,
+    то есть персональные данные. Свод по умолчанию — только числа.
+    """
+    from .calls import read as read_calls
+
+    path = cfg.paths.calls_path()
+    records = list(read_calls(path, key=read_sanit_key()))
+    if not records:
+        print(f"журнал вызовов пуст или отсутствует: {path}", file=sys.stderr)
+        return EXIT_OK
+
+    tin = sum(r.get("токенов_вход") or 0 for r in records)
+    tout = sum(r.get("токенов_выход") or 0 for r in records)
+    secs = sum(r.get("задержка_с") or 0 for r in records)
+    by_class: dict = {}
+    for r in records:
+        by_class[r.get("класс", "?")] = by_class.get(r.get("класс", "?"), 0) + 1
+
+    print(f"вызовов: {len(records)}")
+    print(f"токенов: вход {tin}, выход {tout}, всего {tin + tout}")
+    print(f"время в сети: {secs:.0f} с, в среднем {secs / len(records):.1f} с на вызов")
+    print("по классам: " + ", ".join(f"{k}={v}" for k, v in sorted(by_class.items())))
+
+    for r in records[-last:] if last else []:
+        print(f"\n── вызов класса {r.get('класс')} · ячеек {r.get('ячеек_в_заявке')} "
+              f"· попытки {r.get('попытки')} · {r.get('задержка_с')} с "
+              f"· {r.get('токенов_вход')}+{r.get('токенов_выход')} токенов")
+        if raw:
+            print("   ЗАПРОС:\n" + str(r.get("запрос", ""))[:4000])
+            print("   ОТВЕТ:\n" + str(r.get("ответ_сырой", ""))[:4000])
+    return EXIT_OK
+
+
 def main(argv: Sequence[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv))
@@ -380,6 +427,8 @@ def main(argv: Sequence[str]) -> int:
             return _reverse(cfg, args.into)
         if args.command == "report":
             return _report(cfg, want_pdf=args.pdf)
+        if args.command == "calls":
+            return _calls(cfg, last=args.last, raw=args.raw)
 
         raise AssertionError(f"необработанная команда {args.command!r}")  # argparse choices исключает
     except GateFailed as exc:

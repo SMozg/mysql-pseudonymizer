@@ -398,3 +398,58 @@ def test_quota_refusal_slows_the_run_down_instead_of_killing_it(monkeypatch, con
     assert model_mod._PACE["interval"] == model_mod._PACE_SECONDS, (
         "темп не включился после отказа по квоте")
     assert "темп" in capsys.readouterr().err, "переход на щадящий темп не назван вслух"
+
+
+# --- журнал вызовов поставщика ----------------------------------------------
+
+
+def test_every_call_is_recorded_before_the_answer_is_parsed(monkeypatch, config, tmp_path):
+    """📌 Ответ модели оплачен — терять его нельзя ни при какой поломке разбора.
+
+    Решение владельца 06.09. Журнал вызовов закрывает четыре дыры разом:
+    диагностику (видно, что поставщик прислал НА САМОМ ДЕЛЕ, а не только вердикт
+    фильтра), обрыв сети, обрыв на стороне модели (усечённый JSON виден сырым
+    текстом) и расход (токены записаны, «бюджет прогона» становится замером).
+
+    ⛔ Запись идёт ДО разбора: если разбор споткнётся, оплаченный ответ обязан
+    остаться на диске. Тест ломает разбор намеренно и требует, чтобы запись
+    всё равно нашлась.
+    ⛔ И второе требование, не менее важное: в ФАЙЛЕ исходных значений открытым
+    текстом нет. Запрос их содержит по необходимости, поэтому журнал шифруется
+    тем же ключом, что словарь, — это артефакт того же класса.
+    """
+    import os
+
+    from sanitizer.calls import read as read_calls
+    from sanitizer.providers import model as model_mod
+
+    key = os.urandom(32)
+    monkeypatch.setenv("SANIT_KEY", key.hex())
+    monkeypatch.setenv("SANIT_MODEL_KEY", "fixture-only-not-a-real-key")
+    monkeypatch.delenv("SANIT_MODEL_BASE_URL", raising=False)
+    monkeypatch.setattr(model_mod, "_SEED_ACCEPTED", {})
+    monkeypatch.setattr("litellm.completion",
+                        lambda **kw: _FakeLiteLLMResponse("это не JSON вовсе"))
+
+    cfg = config.with_overrides(dictionary=tmp_path / "dict.enc")
+    provider = model_mod.ModelProvider(cfg)
+    cls = next(iter(provider.handles))
+    item = RequestItem(key=("probe_table", (1,), "probe_column"), attempt=0, value_class=cls,
+                       old_value="Probe Original Value",
+                       length_limit=R.CLASS_LIMITS.get(cls), fmt={})
+    batch = Batch(value_class=cls, items=(item,), taken=frozenset(), seed=1)
+
+    # ⛔ Разбор обязан споткнуться: ответ не JSON. Каким бы ни был исход вызова,
+    # запись уже должна лежать на диске.
+    try:
+        provider.supply(batch)
+    except Exception:  # noqa: BLE001 -- предмет теста не в том, КАК он упал
+        pass
+
+    path = cfg.paths.calls_path()
+    records = list(read_calls(path, key=key))
+    assert records, "оплаченный ответ не сохранён: разбор споткнулся и потерял его"
+    assert records[-1]["ответ_сырой"] == "это не JSON вовсе", "сырой ответ не тот"
+    assert "Probe Original Value" in records[-1]["запрос"], "запрос сохранён не целиком"
+    assert b"Probe Original Value" not in path.read_bytes(), (
+        "исходное значение лежит в файле ОТКРЫТЫМ ТЕКСТОМ -- журнал не зашифрован")

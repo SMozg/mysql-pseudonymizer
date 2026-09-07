@@ -94,6 +94,14 @@ class PathsConfig:
     report: Path
     snapshot_before: Path
     snapshot_after: Path
+    #: 📌 Журнал вызовов поставщика. Необязателен в файле конфига: умолчание
+    #: кладёт его рядом со словарём, потому что это артефакт того же класса --
+    #: текст запроса несёт исходные значения. Существующие конфиги правки
+    #: не требуют, а новое поле не может быть забыто по недосмотру.
+    calls: Optional[Path] = None
+
+    def calls_path(self) -> Path:
+        return self.calls if self.calls is not None else self.dictionary.parent / "calls.enc"
 
 
 # override верхнего уровня -> (имя секции Config, имя поля внутри секции).
