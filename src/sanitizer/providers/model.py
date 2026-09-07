@@ -183,6 +183,13 @@ def _call_seed(batch) -> int:
     return int.from_bytes(digest, "big")
 
 
+#: Классы, которым идёт запрос с НЕСКОЛЬКИМИ вариантами на строку и БЕЗ странового
+#: тега. ⛔ Замер 07.09 развёл их с городом: тег, полезный городу (настоящий город
+#: той же страны, Р-1), человеку ВРЕДЕН -- он запирает модель в её топ-3 имени на
+#: страну (203 разных имени против 587 без тега).
+_MULTI_OPTION_CLASSES = frozenset({"КЗ-1", "КЗ-2"})
+
+
 class ModelProvider:
     """Живая модель. Классы значений КЗ-1...КЗ-3 (текстовые персональные поля)."""
 
@@ -353,7 +360,7 @@ class ModelProvider:
     #: а не нового вызова на пятьдесят строк; выход же оплачивается всегда и втрое
     #: дороже входа. Плюс короткий ответ модель держит лучше -- ровно та болезнь,
     #: с которой боролись четыре прогона.
-    _CANDIDATES_PER_ITEM = 1
+    _CANDIDATES_PER_ITEM = 3
 
     @staticmethod
     def _prompt(batch) -> str:
@@ -385,20 +392,39 @@ class ModelProvider:
             "КЗ-4": "district", "КЗ-5": "street address",
         }.get(batch.value_class, "value")
 
-        lines = [
-            f"Find replacements for {what}. Each replacement must be plausible",
-            "and must NOT be equal to the original value of its line.",
-            "The number in brackets is the length of the original: keep the same length "
-            "or close to it.",
-            # 📌 ЗАМЕРЕНО 07.09: без этой строки вызов на 50 строк вернул 17 различных
-            # замен -- RACHEL восемь раз, JANET пять. Формулировка владельца, дословно.
-            "All replacements should be different from each other.",
-        ]
+        # ⛔ ЗАГОЛОВОК РАЗНЫЙ ПО КЛАССАМ, И КАЖДЫЙ -- ДОСЛОВНО ИЗ СВОЕГО ЗАМЕРА.
+        # Формулировки владельца, приведены буква в букву; перефразировать нельзя:
+        # каждое отличие здесь стоило отдельного вызова, и все они записаны в
+        # `docs/ЗАМЕРЫ.md`. Слить два заголовка в один «покрасивее» -- значит
+        # выбросить замер и вернуться к догадкам.
+        if batch.value_class in _MULTI_OPTION_CLASSES:
+            # Замер 07.09: 587 РАЗНЫХ замен из 591 строки, эхо живёт только в
+            # первом варианте -- фильтр берёт второй. Кругов понадобилось два.
+            lines = [
+                f"Find replacements for {what} and must NOT be equal to the original "
+                f"value of its line.",
+                "All replacements should be different from each other.",
+                "The number in brackets is the length of the original: keep the same "
+                "length or close to it.",
+                f"Give {ModelProvider._CANDIDATES_PER_ITEM} different options for each "
+                f"line, ordered from best to worst.",
+            ]
+        else:
+            # Класс города: этот заголовок замерен со страновым тегом (367 разных
+            # из 600) и остаётся как есть. ⛔ Требование Р-1 -- настоящий город той
+            # же страны -- без тега невыполнимо, поэтому здесь тег и остаётся.
+            lines = [
+                f"Find replacements for {what}. Each replacement must be plausible",
+                "and must NOT be equal to the original value of its line.",
+                "The number in brackets is the length of the original: keep the same length "
+                "or close to it.",
+                "All replacements should be different from each other.",
+            ]
 
         has_country = any(
             (item.fmt.get("country_id") if item.fmt else None) is not None for item in batch.items
         )
-        if has_country and batch.value_class == "КЗ-3":
+        if has_country and batch.value_class not in _MULTI_OPTION_CLASSES:
             # ⛔ Р-1: замена для города -- РЕАЛЬНЫЙ город ТОЙ ЖЕ страны. Единственное
             # место, где у модели просят знание о мире, а не правдоподобие.
             lines.append(
@@ -406,25 +432,18 @@ class ModelProvider:
                 "same country as the original city of that line; lines with the same tag "
                 "must stay in the same country."
             )
-        elif has_country:
-            # 📌 Тот же приём перенесён с города на человека (идея владельца 07.09).
-            # Замер: с тегом страны модель отдаёт 422 РАЗНЫХ города из 600, без тега --
-            # 47 разных имён на 591 строку. Якорь на строке заставляет думать построчно.
-            # ⛔ Решение владельца 07.09: строки «lines with different tags must not get
-            # the same replacement» здесь НЕТ. Она повторяла другими словами уже сказанное
-            # («all replacements should be different from each other») -- повтор требования
-            # не усиливает его, а даёт модели лишнюю работу на разбор. Тот же урок, что
-            # `must` против `should` (Р-118).
-            lines.append(
-                f"Each line has a country tag: the replacement must be a REAL {what} "
-                f"commonly used in that country."
-            )
-
-        lines += [
-            'Answer with JSON only: {"0": "replacement", "1": "replacement", ...} '
-            "-- the key is the line number.",
-            "",
-        ]
+        if batch.value_class in _MULTI_OPTION_CLASSES:
+            lines += [
+                'Answer with JSON only: {"0": ["option", "option", "option"], "1": [...], ...}',
+                "-- the key is the line number.",
+                "",
+            ]
+        else:
+            lines += [
+                'Answer with JSON only: {"0": "replacement", "1": "replacement", ...} '
+                "-- the key is the line number.",
+                "",
+            ]
 
         for n, item in enumerate(batch.items):
             length = len(str(item.old_value)) if item.old_value else item.length_limit
@@ -432,7 +451,7 @@ class ModelProvider:
             # 📌 Название страны, если оно известно; число -- только запасной путь.
             # `country:82` для модели загадка, `country:Saudi Arabia` -- факт.
             country = (item.fmt.get("country") or item.fmt.get("country_id")) if item.fmt else None
-            if country is not None:
+            if country is not None and batch.value_class not in _MULTI_OPTION_CLASSES:
                 line += f" country:{country}"
             # 📌 Решение владельца 07.09: приписки «already refused» в запросе НЕТ.
             # Повторный заход отличается от первого РОВНО ОДНИМ -- в нём меньше строк.

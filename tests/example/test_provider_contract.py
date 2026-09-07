@@ -472,30 +472,50 @@ def _prompt_for(cls: str, country: str | None):
                                        taken=frozenset(), seed=1))
 
 
-def test_a_person_line_carries_its_own_country_anchor():
-    """📌 У КАЖДОЙ строки имени свой якорь — страна, как давно было у города.
+def test_a_person_line_carries_NO_country_anchor():
+    """⛔ Р-125 отменил Р-122: тег страны человеку ВРЕДЕН, и его в строке нет.
 
-    ⛔ Замер прогона 07.09: с тегом страны модель отдала 422 РАЗНЫХ города из 600,
-    без тега — 47 разных имён на 591 строку. Пакет один и тот же: дело не в его
-    размере, а в том, думает ли модель про строку или про класс.
+    Утверждение перевёрнуто ЗАМЕРОМ, а не вкусом. С тегом модель отдала 203 разных
+    имени на 591 строку -- она запирается в своих топ-3 именах на страну (для Китая
+    3 разных на 50 строк). Без тега тот же вопрос дал 587 разных из 591. Тег не
+    расширял словарь модели, а сужал его.
     """
     text = _prompt_for("КЗ-1", "Japan")
-    assert "country:Japan" in text, "тег страны не доехал до строки запроса"
-    assert "REAL first name commonly used in that country" in text, (
-        "строка требования к имени не появилась — тег без требования бесполезен")
-
-
-def test_a_city_line_keeps_its_own_wording():
-    """⛔ У города требование ДРУГОЕ (Р-1: реальный город той же страны) и оно не
-    должно подмениться общей формулировкой для человека."""
-    text = _prompt_for("КЗ-3", "Japan")
-    assert "REAL city of the same country" in text
-    assert "first name" not in text
-
-
-def test_without_a_country_the_line_stays_as_it_was():
-    """Чужая база может не иметь справочника стран — запрос обязан работать и так."""
-    text = _prompt_for("КЗ-1", None)
-    assert "country:" not in text
+    assert "country:" not in text, "страновой тег снова уехал человеку -- см. Р-125"
     assert "commonly used in that country" not in text
-    assert "Find replacements for first name" in text
+
+
+def test_a_person_is_asked_for_several_options_per_line():
+    """📌 Замер 07.09: эхо живёт в ПЕРВОМ варианте (558 из 591), второй и третий
+    у модели живые. Просить несколько вариантов дешевле, чем переспрашивать: фильтр
+    берёт первый годный внутри того же ответа, без второго вызова."""
+    text = _prompt_for("КЗ-1", None)
+    assert "different options for each line" in text
+    assert '{"0": ["option", "option", "option"]' in text, "формат ответа не список вариантов"
+
+
+def test_a_city_keeps_its_country_anchor_and_its_own_wording():
+    """⛔ У города тег ОБЯЗАТЕЛЕН и остаётся: требование Р-1 -- настоящий город ТОЙ ЖЕ
+    страны -- без него невыполнимо. Замер: 367 разных городов из 600. Заголовок города
+    тоже свой и не должен подмениться формулировкой для человека."""
+    text = _prompt_for("КЗ-3", "Japan")
+    assert "country:Japan" in text
+    assert "REAL city of the same country" in text
+    assert "different options for each line" not in text
+
+
+def test_the_person_prompt_matches_the_measurement_word_for_word():
+    """⛔ Заголовок сверяется С ЗАМЕРОМ ДОСЛОВНО. Формулировка владельца; каждое
+    отличие от неё стоило отдельного платного вызова, и переписать её «покрасивее»
+    значит выбросить замер. Замеры -- `docs/ЗАМЕРЫ.md`."""
+    expected = [
+        "Find replacements for first name and must NOT be equal to the original "
+        "value of its line.",
+        "All replacements should be different from each other.",
+        "The number in brackets is the length of the original: keep the same length "
+        "or close to it.",
+        "Give 3 different options for each line, ordered from best to worst.",
+        'Answer with JSON only: {"0": ["option", "option", "option"], "1": [...], ...}',
+        "-- the key is the line number.",
+    ]
+    assert _prompt_for("КЗ-1", None).split("\n")[:6] == expected

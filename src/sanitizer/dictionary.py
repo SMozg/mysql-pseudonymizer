@@ -467,22 +467,17 @@ class Dictionary:
         return _norm(scope) if isinstance(scope, str) else scope
 
     def set_country_hints(self, hints: Mapping) -> None:
-        """Страновые подсказки для классов человека (КЗ-1/КЗ-2) -- см. `_country_hints`
-        в раннере. Ключ словаря они НЕ трогают."""
+        """⛔ Р-125 отменил Р-122: страновая подсказка человеку ВРЕДНА (замер 07.09 --
+        203 разных имени с тегом против 587 без него), и в запрос она больше не идёт.
+        Метод оставлен пустым намеренно: он входит в контракт вызова из раннера, а
+        снос контракта ради трёх строк -- правка ради правки. Подсказка городу берётся
+        не отсюда, а из охвата значения (`eff_scope`), и её Р-125 не касается.
+        """
         self._country_hints = dict(hints or {})
 
     def _fmt_for(self, cls: str, it: Mapping) -> dict:
         if cls in ("КЗ-6", "КЗ-7"):
             return {"digits_only": True, "length": len(it["current"])}
-        if cls in ("КЗ-1", "КЗ-2"):
-            cid = self._country_hints.get((cls, it["eff_scope"]))
-            if cid is None:
-                return {}
-            fmt = {"country_id": cid}
-            name = self._countries.get(cid)
-            if name:
-                fmt["country"] = name
-            return fmt
         if cls == "КЗ-3" and isinstance(it["eff_scope"], tuple) and len(it["eff_scope"]) == 2:
             country_id = it["eff_scope"][1]
             fmt = {"country_id": country_id}
