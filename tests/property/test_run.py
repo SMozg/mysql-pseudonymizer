@@ -318,10 +318,18 @@ def test_c24_two_counters_and_they_differ(conn, sanit_schema, cur):
         f"полный словарь {row['dict_rows']} записей, ждали {R.C28_REVERSIBLE_CELLS} (Р-88)")
 
 
-def test_c24_refusals_stay_under_the_ceiling(conn, sanit_schema, cur):
-    """Отказов не более 138 (5 % от 2771). Перешёл потолок -- прогон красный."""
+def test_c24_retries_are_published_as_a_number(conn, sanit_schema, cur, report_text):
+    """📌 Р-120: повторы -- ЧИСЛО В ОТЧЁТЕ, а не потолок.
+
+    ⛔ Было: «повторов не больше 138, иначе прогон красный». Приёмка краснела на
+    прогоне, у которого ВСЕ значения получили замену, -- потолок мерил цену, а не
+    результат. Теперь цена обязана быть ВИДНА: спрятать её вместо гейта значило бы
+    заменить ложную тревогу молчанием. Гейт результата -- значение без замены, и он
+    в прогоне (`RefusalCeilingExceeded`), не здесь.
+    """
     row = h.one(conn, h.q(Q.C24_REPORT_COUNTERS, cur=cur, sanit=sanit_schema))
-    assert row["refused"] <= R.C24_REFUSAL_CEILING
+    assert f"повторных попыток: {row['refused']}" in report_text, (
+        "число повторов не попало в отчёт -- цена прогона стала невидимой")
 
 
 def test_c24_no_value_was_asked_twice(conn, sanit_schema, cur, sanitized):

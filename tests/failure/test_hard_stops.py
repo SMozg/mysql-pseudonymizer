@@ -321,22 +321,67 @@ def test_provider_broken_forever_stops_the_run_loudly(case_pipeline, mode):
     assert "потолок" in text, f"остановка не назвала, что именно исчерпано: {text}"
 
 
-# --- потолок отказов --------------------------------------------------------
+# --- повторы и значения без замены (Р-120) ----------------------------------
 
 
-def test_refusal_ceiling_makes_the_run_red(case_pipeline):
-    """Отказов больше 138 (5 % от 2771) -> прогон КРАСНЫЙ, даже без исчерпания.
+def test_many_retries_do_not_kill_a_run_that_converged(case_pipeline):
+    """📌 Р-120: повторов БОЛЬШЕ потолка, но все значения разрешились -> прогон ДОХОДИТ.
 
-    ⛔ «3 повтора на значение» и «138 отказов на прогон» не заменяют друг друга:
-    первое ловит безвыходную ячейку, второе -- плохо работающего поставщика.
+    ⛔ Утверждение переписано, а не удалено. Было: «повторов больше 138 -> красное».
+    Такой гейт стоял ПОСЛЕ построения словаря и убивал прогон, у которого не осталось
+    ни одного значения без замены, -- уже потратив деньги на модель (инцидент 07.09:
+    579 повторов при НУЛЕ неразрешённых). Сторож расхода, срабатывающий после расхода,
+    ничего не экономит. Повтор -- цена, и она публикуется числом (критерий 24).
     """
     provider = fakes.FakeModelProvider(refuse_budget=R.C24_REFUSAL_CEILING + 10)
-    with pytest.raises(errors.RefusalCeilingExceeded):
+    result = case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
+    assert result.exit_code == 0
+    assert provider._refused_used > R.C24_REFUSAL_CEILING, (
+        "двойник не отбил столько, сколько обещал: тест проверял бы не то")
+
+
+def test_retries_over_the_ratio_are_named_in_the_runlog(case_pipeline):
+    """📌 Р-120: перерасход не убивает прогон, но и не молчит -- строка в журнале.
+
+    Убрать гейт и не оставить следа значило бы спрятать то, ради чего гейт заводили:
+    поставщик, возвращающий вход, обязан быть виден числом.
+    """
+    provider = fakes.FakeModelProvider(refuse_budget=R.C24_REFUSAL_CEILING + 10)
+    case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
+    warns = [e for e in case_pipeline.runlog.entries
+             if e.event == "retries_over_ratio"]
+    assert warns, "перерасход повторов прошёл молча"
+    assert warns[0].payload["повторов"] > warns[0].payload["порог"]
+
+
+def test_a_value_left_without_a_replacement_is_a_hard_stop(case_pipeline, monkeypatch):
+    """📌 Р-120: ГЕЙТОМ осталось то, что действительно ломает поставку.
+
+    Значение без замены -- неполный словарь: применять нечего, а тихое продолжение
+    дало бы полуобезличенную базу. Гейт обязан быть ДОСТИЖИМЫМ, иначе он украшение;
+    поэтому здесь словарь принудительно возвращает дыру.
+    """
+    from sanitizer.dictionary import Dictionary
+
+    original = Dictionary.resolve_batch
+
+    def with_a_hole(self, items, rule, providers):
+        results = original(self, items, rule, providers)
+        if results:
+            results[0] = None
+        return results
+
+    monkeypatch.setattr(Dictionary, "resolve_batch", with_a_hole)
+    provider = fakes.FakeModelProvider()
+    with pytest.raises(errors.RefusalCeilingExceeded) as stop:
         case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
+    text = str(stop.value)
+    assert "без замены" in text, f"остановка не назвала причину: {text}"
+    assert "словарь неполон" in text, f"остановка не назвала следствие: {text}"
 
 
 def test_refusals_just_under_the_ceiling_are_green(case_pipeline):
-    """А ровно под потолком прогон обязан дойти до конца: гейт, а не запрет отказов."""
+    """А немного повторов прогон обязан пережить и без Р-120: повтор -- не брак."""
     provider = fakes.FakeModelProvider(refuse_budget=3)
     result = case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
     assert result.exit_code == 0

@@ -340,7 +340,9 @@ class Verifier:
             counters_rows = tuple(_Row(name, "-", value, "P") for name, value in counters.items())
             spend_row = (
                 f"вызовов: {counters.get('calls', 0)}, принято: {counters.get('accepted', 0)}, "
-                f"отказов: {counters.get('refused', 0)}, токены: — (прочерк, поставщик их не считает)"
+                f"повторных попыток: {counters.get('refused', 0)} "
+                f"(Р-120: цена прогона, а не брак -- гейтом идут значения без замены), "
+                f"токены: — (прочерк, поставщик их не считает)"
             )
 
             declared = any(e.event == "declaration" for e in getattr(self.runlog, "entries", ()))
@@ -762,12 +764,16 @@ class Verifier:
         dict_rows = counters["dict_rows"] or 0
         by_value = _scalar(conn, Q.C24_BY_VALUE_ROWS, sanit=sanit) or 0
         records_n = len(list(self.dictionary.records()))
-        ceiling = int(accepted * 0.05) if accepted else 0
-        ok = by_value != accepted and by_value > 0 and refused <= ceiling and dict_rows == records_n
+        # 📌 Р-120: повторы -- ДИАГНОСТИКА со своим числом, а не гейт (как склейки в 26).
+        # Повтор случается на значении, которое В ИТОГЕ разрешилось; значение,
+        # оставшееся без замены, ловится громкой остановкой в прогоне, а не здесь.
+        share = (refused / accepted) if accepted else 0.0
+        ok = by_value != accepted and by_value > 0 and dict_rows == records_n
         return _cr(24, "Два счётчика прогона, разные по построению (принятые != словарь по значению); "
-                        "отказы под потолком",
-                    f"accepted != by_value (>0), refused<={ceiling}",
-                    f"accepted={accepted}, by_value={by_value}, refused={refused}, dict_rows={dict_rows}", ok)
+                        "повторные попытки -- числом",
+                    "accepted != by_value (>0), dict_rows == записей словаря",
+                    f"accepted={accepted}, by_value={by_value}, dict_rows={dict_rows}, "
+                    f"повторных попыток={refused} ({share:.1%} от принятых)", ok)
 
     def _c25(self, after) -> CriterionResult:
         changed = [t for t in after.last_update_hashes

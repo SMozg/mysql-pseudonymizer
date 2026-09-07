@@ -5,7 +5,7 @@
 [![tests](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml/badge.svg)](https://github.com/SMozg/mysql-pseudonymizer/actions/workflows/tests.yml)
 [![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
-[![tests 189/189](https://img.shields.io/badge/tests-189%2F189-brightgreen.svg)](tests)
+[![tests 167/167](https://img.shields.io/badge/tests-167%2F167-brightgreen.svg)](tests)
 
 In goes a working MySQL database, out comes the same one: same schema, same row count, same
 relations — without personal data. Replacements are meaningful, not `xxxxx`, and reversible
@@ -79,10 +79,17 @@ Run every command **from the repository root**: that is where `.env` and `config
 ```bash
 git clone https://github.com/SMozg/mysql-pseudonymizer.git
 cd mysql-pseudonymizer
+
+# A VIRTUAL ENVIRONMENT IS MANDATORY. On Ubuntu 24.04 and other PEP 668 systems
+# `pip install` into the system Python refuses: externally-managed-environment.
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 1. demo stand. Sakila data lives in the repo, nothing to download.
 cp demo/sakila/.env.example demo/sakila/.env    # set MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD
+#   The stand port lives there too, one line: MYSQL_HOST_PORT (3307 by default). Both
+#   docker compose and the config read it: if the port is taken, ONE place is edited.
 docker compose -f demo/sakila/docker-compose.yml up -d
 docker compose -f demo/sakila/docker-compose.yml ps    # wait for healthy
 #   The stand runs under its own compose project (`sanitizer-sakila`) with its own
@@ -97,10 +104,16 @@ python -c "import secrets; print('SANIT_KEY=' + secrets.token_hex(32))" >> .env
 #   cities cannot be replaced (classes КЗ-1…КЗ-3 go through the model).
 #   SANIT_MODEL_BASE_URL — if the model sits behind an OpenAI-compatible gateway.
 
-# 3. the run
+# 3. the run. Outside a venv the command is spelled `python3`: a bare `python`
+#    does not exist at all on a clean Ubuntu.
 python -m sanitizer prepare --config config/config.yaml
 python -m sanitizer run     --config config/config.yaml --declare base
+#   `run` is SILENT and long (10–20 minutes: it waits for the model). Signs of life,
+#   in another window: `tail -f runlog/run.runlog` and `python -m sanitizer calls --last 5`
+#   (calls, tokens, timing; without --raw no values are printed — requests carry PD).
 python -m sanitizer verify  --config config/config.yaml
+#   verify OVERWRITES report/ОТЧЕТ-ПРИЕМКИ.md. The report shipped in the repository is
+#   the AUTHOR'S run, offered as evidence; your own run takes its place.
 #   verify --twin additionally performs a PAIRED run (two runs with one seed on
 #      fresh copies, each with its own dictionary) and measures repeatability —
 #      criterion 21. That is two real runs: time and model calls.
@@ -114,7 +127,7 @@ and a variable already set outside wins over the file. Port and user live in a s
 variable stops the run at the pre-flight gate naming it, instead of a connection refusal with
 no reason.
 
-Tests use the same stand: `pytest` (189 tests, about 15 minutes — they run real sanitisation
+Tests use the same stand: `pytest` (167 tests, 10–20 minutes — they run real sanitisation
 passes over copies of the database, not stubs).
 
 `config/config.yaml` targets the demo stand; for your own database use `config/config.example.yaml`
@@ -127,12 +140,29 @@ Docker Compose for the demo. The tool needs read on the source schema and full r
 demo stand sets both itself (`demo/sakila/initdb/03-grants.sql`, `docker-compose.yml`). Secrets
 live in the environment, never in the config — see `.env.example`.
 
+## If the run stops
+
+| stop | what happened | what to do |
+|---|---|---|
+| `значений без замены` (code 2) | the dictionary is incomplete, nothing to apply | `calls --last 5` shows the last calls; fix model access and run again |
+| `RetriesExhausted` (code 2) | one value exhausted every attempt | the stop names the cell and how many candidates arrived: raise `retry_limit` or relax the column length |
+| gate failed (code 3) | a variable, a grant or a stand condition is missing | the stop names WHAT is missing — fill it in and repeat |
+| red acceptance (code 1) | the run finished but a criterion failed | `report/ОТЧЕТ-ПРИЕМКИ.md` names the failing criterion |
+
+**Continuing an interrupted run** — `--declare continue`: it walks the dictionary already
+built and does not spend the model again. An interrupted run leaves NO half-anonymised base:
+the dictionary is built whole and only then applied.
+
+**Retries are a cost, not a failure.** A live model sometimes returns the original value
+instead of a replacement; the filter rejects it and asks again. The number of retries is a
+separate line in the report. Only a value left WITHOUT a replacement kills the run.
+
 ## What the numbers prove
 
 | | |
 |---|---|
 | acceptance criteria | **29 of 30 pass** |
-| tests | **189 of 189** |
+| tests | **167 of 167** |
 | reversibility | **5267 of 5267 cells**, 0 unrecoverable, matched the BEFORE snapshot |
 | volume | 47,268 rows before and after |
 | relations | 22 foreign keys resolve, 0 orphans |

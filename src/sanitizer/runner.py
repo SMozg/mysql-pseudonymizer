@@ -338,11 +338,30 @@ class Runner:
 
             accepted_total = sum(accepted_by_class.get(c, 0) for c in _REFUSAL_CLASSES)
             ceiling = int(accepted_total * rule.refusal_ratio) if accepted_total else 0
-            if refused_total > ceiling:
+
+            # ⛔ Р-120: ПОТОЛОК ГЕЙТИТ ЗНАЧЕНИЯ БЕЗ ЗАМЕНЫ, А НЕ ПОВТОРЫ.
+            # `refused_total` -- сумма попыток по значениям, которые В ИТОГЕ
+            # РАЗРЕШИЛИСЬ (`r is not None`): это ЦЕНА прогона, а не брак. Гейт на
+            # ней убивал прогон ПОСЛЕ того, как деньги потрачены и словарь построен
+            # целиком, -- сторож расхода, срабатывающий после расхода, не экономит
+            # ничего, он выбрасывает готовый результат (инцидент 07.09: 579 повторов
+            # при НУЛЕ неразрешённых значений). Повтор публикуется ЧИСЛОМ в отчёте
+            # (критерий 24) и предупреждением в журнале -- тем же приёмом, каким
+            # Р-117 развёл склейки и брак.
+            unresolved = [items[i][0] for i, r in enumerate(results) if r is None]
+            if unresolved:
+                table, _pk, column = unresolved[0]
                 raise RefusalCeilingExceeded(
-                    f"отказов {refused_total} больше потолка {ceiling} "
-                    f"({rule.refusal_ratio:.0%} от {accepted_total})"
+                    f"значений без замены: {len(unresolved)} из {len(results)} "
+                    f"-- словарь неполон, первое: {table}.{column}"
                 )
+            if refused_total > ceiling:
+                self.runlog.log("warn", "retries_over_ratio", {
+                    "повторов": refused_total,
+                    "порог": ceiling,
+                    "доля": rule.refusal_ratio,
+                    "принято": accepted_total,
+                })
 
             cells_for_apply = self._cells_for_apply(field_map, cfg.stand.work_schema, conn, dictionary)
             applier = Applier(passp, field_map, dictionary)
