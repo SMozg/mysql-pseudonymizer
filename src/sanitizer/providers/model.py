@@ -231,6 +231,11 @@ class ModelProvider:
         if base_url and "/" not in model_name:
             model_name = f"openai/{model_name}"
 
+        # 📌 ТЕМПЕРАТУРА -- ВЫБОР МЕЖДУ ДВУМЯ ТРЕБОВАНИЯМИ ЗАКАЗЧИКА (решение
+        # владельца 07.09, замерено). Ноль даёт повторяемость и убивает
+        # разнообразие: жадный выбор берёт самое вероятное имя, и на пакете из
+        # 50 строк выходит 21 различная замена вместо 50. Значение живёт в
+        # конфиге, а не здесь: это решение, а не деталь реализации.
         # ⛔ ПОВТОРЯЕМОСТЬ ПРОГОНА (критерий 21) начинается здесь, а не в раннере.
         # Пока поставщик замен отвечает на один и тот же запрос по-разному, два
         # прогона с одним seed совпасть не могут ни при какой логике выше --
@@ -242,7 +247,7 @@ class ModelProvider:
             model=model_name,
             api_key=key,
             messages=[{"role": "user", "content": self._prompt(batch)}],
-            temperature=0,
+            temperature=getattr(self.cfg.run, "temperature", 1.0),
         )
         if base_url:
             call_kwargs["api_base"] = base_url
@@ -385,6 +390,9 @@ class ModelProvider:
             "and must NOT be equal to the original value of its line.",
             "The number in brackets is the length of the original: keep the same length "
             "or close to it.",
+            # 📌 ЗАМЕРЕНО 07.09: без этой строки вызов на 50 строк вернул 17 различных
+            # замен -- RACHEL восемь раз, JANET пять. Формулировка владельца, дословно.
+            "All replacements should be different from each other.",
         ]
 
         has_country = any(
@@ -413,9 +421,14 @@ class ModelProvider:
             country = (item.fmt.get("country") or item.fmt.get("country_id")) if item.fmt else None
             if country is not None:
                 line += f" country:{country}"
-            if item.rejected:
-                # ⛔ Только на повторе: сказать, что уже пробовали и не прошло.
-                line += " already refused: " + ", ".join(repr(v) for v in item.rejected)
+            # 📌 Решение владельца 07.09: приписки «already refused» в запросе НЕТ.
+            # Повторный заход отличается от первого РОВНО ОДНИМ -- в нём меньше строк.
+            # Причина: лишняя информация простой модели не помогает, а объём запроса
+            # растит. Отказанные варианты по-прежнему копятся внутри (`it["rejected"]`)
+            # и идут в разбор причин остановки -- просто наружу, в запрос, не уходят.
+            # ⛔ Цена решения названа: на temperature=0 поставщик детерминирован и
+            # повтор вернёт то же самое -- повторы выродятся. При температуре выше
+            # нуля ответ на повторе другой, и механизм работает.
             lines.append(line)
         return "\n".join(lines)
 
