@@ -56,8 +56,8 @@ of `config/config.yaml`.
 
 | data class | provider | network | repeats by seed without the dictionary |
 |---|---|---|---|
-| city (`КЗ-3`) | language model | required | no |
-| first name (`КЗ-1`), surname (`КЗ-2`) | permutation inside the class, leftovers to the model | only for leftovers | yes |
+| city (`КЗ-3`) | permutation inside the COUNTRY, leftovers to the model | leftovers only | yes |
+| first name (`КЗ-1`), surname (`КЗ-2`) | permutation inside a same-LENGTH group, leftovers to the model | leftovers only | yes |
 | district (`КЗ-4`), street address (`КЗ-5`) | deterministic generator | none | yes |
 | postal code (`КЗ-6`), phone (`КЗ-7`), coordinate (`КЗ-8`) | non-text provider | none | yes |
 
@@ -179,6 +179,12 @@ a stated reason beats a green with no basis. To measure it for real, run `verify
 a paired run (same seed, fresh copies, a separate dictionary for each) and compares the results.
 Those are real runs: time and model calls.
 
+⛔ **And honestly about the second red.** Besides criterion 21, diversity (criterion 12) goes red on
+the demo stand: the deterministic providers for postal code and district occasionally hand the same
+value to two different cells, and a column loses one distinct value. That is NOT "expected" — it is
+a real failure of the tool's own requirement, published as a number in the report. Do not write off
+exit code 1 on one known cause: read what `verify` printed.
+
 📌 **Retries are a cost, not a failure.** A live model sometimes returns the source value instead of
 a replacement; the filter rejects it and asks again. The retry count goes into the report as a line
 of its own. Only a value left WITHOUT a replacement kills the run.
@@ -195,7 +201,7 @@ Nothing below has to be taken on trust: every number is produced on the spot by 
 | what the run cost in model terms — calls, tokens, time on the wire | `python -m sanitizer calls --config config/config.yaml` |
 | what the model actually answered on a given call | `python -m sanitizer calls --config config/config.yaml --last 5 --raw` (⛔ prints source values) |
 | how acceptance went | `python -m sanitizer verify --config config/config.yaml`, then `report/ОТЧЕТ-ПРИЕМКИ.md` |
-| rebuild the report without re-running the checks | `python -m sanitizer report --config config/config.yaml` |
+| rebuild the report (⛔ it RE-MEASURES every criterion — not a re-render) | `python -m sanitizer report --config config/config.yaml` |
 
 **What to look at in the acceptance report.** The first table lists every criterion with an
 "expected" column, a "fact" column and a `P`/`F` verdict: look for the `F` and read the fact text

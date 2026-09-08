@@ -52,3 +52,48 @@ def test_failures_are_red(tmp_path):
 def test_a_missing_report_is_red(tmp_path):
     """Отчёта нет -- значит прогон не состоялся, а не «нечего проверять»."""
     assert ci_gate.main(["ci_gate.py", str(tmp_path / "нет-такого.xml")]) == 1
+
+
+# --- сторож критерия 23 обязан УМЕТЬ покраснеть (Р-129) ---------------------
+
+
+def test_c23_catches_a_value_planted_into_the_report():
+    """⛔ Сторож смотрит теперь не весь текст отчёта, а его value-несущие части.
+    Проверка, которая после такого сужения не может покраснеть, была бы украшением —
+    поэтому сажаем НАСТОЯЩЕЕ исходное значение в строку разрыва и требуем красного.
+
+    📌 Почему сужение вообще понадобилось: счётчик «из 5027 выданных замен» совпал
+    с почтовым индексом 5027 из этой же базы, и сторож объявил утечку там, где её
+    нет. Причина не в длине числа, а в ПРОИСХОЖДЕНИИ: число инструмент вычислил сам,
+    значение — прочитал из базы, и сравнивать их одной меркой нельзя.
+    """
+    from collections import namedtuple
+    from sanitizer.verifier import Verifier
+
+    Row = namedtuple("Row", ["check", "expect", "fact", "verdict"])
+    Rec = namedtuple("Rec", ["new_val"])
+
+    class FakeDict:
+        originals = type("O", (), {"text": frozenset({"SMITH", "Nagasaki"})})()
+
+        @staticmethod
+        def records():
+            return [Rec(new_val="STEWART")]
+
+    class FakeLog:
+        entries = ()
+
+    stub = Verifier.__new__(Verifier)
+    stub.dictionary = FakeDict()
+    stub.runlog = FakeLog()
+
+    clean = "КЗ-3·city.313.city 2 решение Р-45"
+    assert stub._c23(report_text=clean).verdict == "P", "чистый отчёт не должен краснеть"
+
+    planted = clean + "\nКЗ-2·customer.1.last_name SMITH решение Р-45"
+    assert stub._c23(report_text=planted).verdict != "P", (
+        "настоящее исходное значение в отчёте обязано красить критерий 23")
+
+    counters = "обращений к поставщикам: 9, принято: 2771, из 5027 выданных замен"
+    assert stub._c23(report_text=counters).verdict == "P", (
+        "счётчики в сторожа больше не приходят — им там не место")
