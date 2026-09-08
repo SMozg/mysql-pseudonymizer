@@ -163,18 +163,19 @@ def test_batch_composition_is_deterministic(config, field_map, admin_conn, ref_s
     При разном составе пакетов два прогона разойдутся побитово,
     и детерминизм сборки станет недоказуем.
     """
-    from conftest import Pipeline
+    from conftest import Pipeline, schema_for_test
     from sanitizer import db
 
+    schemas = (schema_for_test("batch_a"), schema_for_test("batch_b"))
     seen = []
     try:
-        for schema in ("sanit_batch_a", "sanit_batch_b"):
+        for schema in schemas:
             rec = fakes.RecordingProvider(fakes.FakeModelProvider())
             p = Pipeline(config, field_map, admin_conn, config.stand.source_schema)
             p.run(work_schema=schema, provider=rec, batch_size=50)
             seen.append([(b["cls"], b["keys"]) for b in rec.batches])
     finally:
-        for schema in ("sanit_batch_a", "sanit_batch_b"):
+        for schema in schemas:
             db.execute(admin_conn, f"DROP DATABASE IF EXISTS {schema}")
     assert seen[0] == seen[1]
 

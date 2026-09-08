@@ -115,6 +115,7 @@ def _load_snapshot(path) -> Snapshot:
 
 
 def _prepare(cfg: Config) -> int:
+    stand.refuse_test_schemas(cfg)
     conn = db.connect(cfg.stand.dsn(schema=None))
     try:
         # ⛔ Тот же блокер, что в runner.py: читать ДО session_init, иначе
@@ -176,6 +177,9 @@ def _build_verifier(cfg: Config) -> Verifier:
 
 
 def _verify(cfg: Config) -> int:
+    # ⛔ Гейт выдачи ДО сборки Verifier: отказ обязан прийти раньше, чем
+    # инструмент напечатает хоть одно число о тестовой схеме.
+    stand.refuse_test_schemas(cfg)
     verifier = _build_verifier(cfg)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
@@ -193,10 +197,21 @@ def _verify(cfg: Config) -> int:
     )
     for r in failed:
         print(f"  F критерий {r.number}: {r.title}", file=sys.stderr)
+    # ⛔ Имя схемы под выдачу печатает САМА приёмка, и только на зелёной.
+    # Держать его в голове (или списывать из README) -- как раз тот способ,
+    # которым выгружают не ту схему; выгружается то, что назвал `verify`.
+    if report.green:
+        print(
+            f"наружу выдаётся ОДНА схема: {cfg.stand.work_schema} "
+            f"(mysqldump ... {cfg.stand.work_schema}); "
+            f"{cfg.stand.ref_schema} -- копия «ДО» в открытом виде, её не выдавать",
+            file=sys.stderr,
+        )
     return EXIT_OK if report.green else EXIT_RED_ACCEPTANCE
 
 
 def _reverse(cfg: Config, into: str) -> int:
+    stand.refuse_test_schemas(cfg)
     verifier = _build_verifier(cfg)
     key_bytes = read_sanit_key()
     result = verifier.reverse(into, key=key_bytes)
@@ -211,6 +226,7 @@ def _reverse(cfg: Config, into: str) -> int:
 
 
 def _report(cfg: Config, *, want_pdf: bool) -> int:
+    stand.refuse_test_schemas(cfg)
     verifier = _build_verifier(cfg)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
@@ -291,6 +307,18 @@ def main(argv: Sequence[str]) -> int:
         cfg = Config.load(args.config)
 
         if args.command == "run":
+            # ⛔ Почему `run` НЕ закрыт `stand.refuse_test_schemas`, а
+            # `prepare`/`verify`/`report`/`reverse` -- закрыты. Гейт стоит там,
+            # где инструмент ВЫСКАЗЫВАЕТСЯ О СХЕМЕ наружу: приёмка печатает
+            # вердикт, который человек цитирует заказчику, и называет схему,
+            # которую он выгружает. `run` ничего наружу не заявляет, а от
+            # чужого содержимого рабочей копии его стерегут собственные
+            # сторожа (`AlreadyChangedCell`, `AnomalousCell`, `AlreadySanitized`).
+            # ⛔ И обратное соображение, ценой в один тест: отказные сценарии
+            # набора зовут `cli.main(["run", ...])` на СВОЕЙ копии из того же
+            # тестового пространства -- гейт на `run` заставил бы прописать им
+            # обход, то есть завести в инструмент дверь, которой человек и
+            # ошибётся. Двери нет: обхода не существует ни для кого.
             # ⛔ Правка командной строки едет В КОНФИГ, а не мимо него. Поставщик
             # замен строится из `cfg` и берёт seed оттуда (`providers.build`):
             # пока `--seed` жил только в `RunRule`, модель работала с одним

@@ -161,7 +161,27 @@ schema. Look for the result in the working schema, not in the source one.
 `sanit_ref` — a full copy of the BEFORE state, in the clear, needed by acceptance for its
 comparisons — stay on the same server right next to it. Dump the one schema for the handover
 (`mysqldump … sanit_work`), and drop `sanit_ref` once the comparison is done:
-`DROP SCHEMA sanit_ref`.
+`DROP SCHEMA sanit_ref`. ⛔ Do not carry the handover schema name in your head: on a green
+acceptance `verify` prints it itself, as its last line — dump what it named.
+
+⛔ **`pytest` never touches the working schema, and that is measured, not promised.** The
+`sanit_test_*` namespace belongs to the test suite entirely: it makes its copies there and only
+there, and drops them behind itself. Three watchdogs hold the rule, and none of them lives in this
+file:
+
+- the suite is physically unable to create a schema without the prefix
+  (`tests/conftest.py::copy_for_test`);
+- the digest of every combat schema is taken BEFORE the first test and AFTER the last one, with the
+  same instrument criterion 22 uses to guard the source database; if any one of them moved, the
+  session fails naming the schema (`tests/conftest.py::combat_schemas_untouched`);
+- `prepare`/`verify`/`report`/`reverse` **refuse to work** on a schema from `sanit_test_*` — exit
+  code 3 and the schema name, not a green line printed over a test double
+  (`sanitizer.stand.refuse_test_schemas`).
+
+It was not always so. Until 2026-09-08 the suite took its names straight from the combat config and
+`pytest` overwrote `sanit_work` — the very schema this section tells you to hand out. Whoever
+followed this README top to bottom shipped the customer a test double. The defect was found by an
+independent review and fixed; the watchdogs above are there so it cannot come back quietly.
 
 ⛔ **After the lines about the `.env` files read, `run` stays quiet to the end**, and on the demo
 stand it is short: nearly all of its time goes to the database, not to the network — the model only
@@ -203,6 +223,9 @@ Exit codes are part of the contract: **0** acceptance with no failures · **1** 
 | `RetriesExhausted` (code 2) | one value exhausted every attempt | the stop names the cell and how many candidates arrived: raise `retry_limit` in the config or relax the column length limit |
 | gate failed (code 3) | a variable, a privilege or a stand condition is missing | the stop names WHAT is missing — fill it in and repeat |
 | red acceptance (code 1) | the run finished but a criterion failed | `verify` prints the number and title of every failure; the detail is in `report/ОТЧЕТ-ПРИЕМКИ.md` |
+| `конфиг указывает на схемы тестового набора` (code 3) | a name from the reserved `sanit_test_*` namespace reached `stand.*_schema` — that is where `pytest` works, and what lies there is a test double, not a cleaned database | put the combat names back into `config/config.yaml` (`sanit_work`, `sanit_ref`, `sanit_restored`) |
+| the stand is `healthy`, yet a command gets `ERROR 1045 (Access denied)` | passwords are written into the VOLUME once, at the first startup. A repeat `up -d` on an old volume quietly keeps the old ones: editing `demo/sakila/.env` does not change them | tear the volume down with its data and bring it up again: `docker compose -f demo/sakila/docker-compose.yml down -v`, then `up -d`. ⛔ `down` **without** `-v` keeps the volume, and the passwords stay old |
+| the stand is `healthy`, yet nothing can log into it | ⛔ the health check was measuring the wrong thing: `mysqladmin ping` with a WRONG password prints "Access denied" and exits with code 0 — the server answered, so it is "healthy". Fixed 2026-09-08: the check now runs a real query under the same password the sanitiser uses | update `demo/sakila/docker-compose.yml` from the repository and recreate the container: `docker compose -f demo/sakila/docker-compose.yml up -d --force-recreate` |
 
 ⛔ **Read the exit code, do not write it off as "that is how it is meant to be".**
 `verify` prints the NUMBERS and the NAMES of every failed criterion: read them before explaining
@@ -227,7 +250,7 @@ Nothing below has to be taken on trust: every number is produced on the spot by 
 | what to check | how |
 |---|---|
 | how many tests the suite holds, and which | `pytest --collect-only -q` |
-| whether they pass against a live database | `pytest` — the tests run real sanitisation passes over copies of the database, not stubs, so allow time. ⛔ The model is replaced by a double in the tests: the suite spends NOT a single call and needs no model key |
+| whether they pass against a live database | `pytest` — the tests run real sanitisation passes over **their own** copies of the source schema, not stubs: the suite creates them as `sanit_test_*` and drops them behind itself, never touching the combat `sanit_work`/`sanit_ref`/`sanit_restored` (see "`pytest` never touches the working schema" above). Allow time. ⛔ The model is replaced by a double in the tests: the suite spends NOT a single call and needs no model key |
 | whether they pass for everyone, not just for me | the `tests` badge above is a live GitHub Actions run, `.github/workflows/tests.yml`; the watchdog `.github/ci_gate.py` fails CI when zero tests were executed, when any test was skipped, and on any failure or error — it has its own tests, `tests/example/test_ci_gate.py` |
 | what the run cost in model terms — calls, tokens, time on the wire | `python -m sanitizer calls --config config/config.yaml` |
 | what the model actually answered on a given call | `python -m sanitizer calls --config config/config.yaml --last 5 --raw` (⛔ prints source values) |

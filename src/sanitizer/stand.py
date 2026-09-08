@@ -16,10 +16,49 @@ import re
 from datetime import datetime, timezone
 
 from . import db
-from .errors import DdlNotVisible
+from .errors import DdlNotVisible, TestSchemaRefused
 from .models import StandPassport
 
 _GROUP_CONCAT_MAX_LEN = 1073741824
+
+#: ⛔ ЗАРЕЗЕРВИРОВАННОЕ ПРОСТРАНСТВО ИМЁН ТЕСТОВОГО НАБОРА.
+#: Всё, что заводит `pytest`, называется `sanit_test_*` и ничем другим -- боевые
+#: `work_schema`/`ref_schema`/`restored_schema` под тесты не попадают никогда.
+#: ⛔ Цена, из-за которой префикс появился (находка независимого судьи 08.09.2026):
+#: `tests/conftest.py` брал ФИКСИРОВАННОЕ имя `sanit_work` из боевого конфига, и
+#: `pytest` затирал ту самую схему, которую README велит отдавать наружу. После
+#: набора в `sanit_work.customer` лежал тестовый двойник, `verify` падал 27 из 29,
+#: а читатель, идущий по README сверху вниз, выгружал заказчику ТЕСТОВУЮ базу.
+#: Правило держится с двух сторон: тесты не умеют завести схему без этого
+#: префикса (`tests/conftest.py::copy_for_test`), а инструмент отказывается судить и
+#: выдавать схему С этим префиксом (`refuse_test_schemas` ниже).
+TEST_SCHEMA_PREFIX = "sanit_test_"
+
+
+def reserved_test_schemas(cfg) -> list[str]:
+    """Схемы конфига, попавшие в зарезервированное тестовое пространство."""
+    named = (cfg.stand.source_schema, cfg.stand.work_schema,
+             cfg.stand.ref_schema, cfg.stand.restored_schema)
+    return sorted({s for s in named if str(s).startswith(TEST_SCHEMA_PREFIX)})
+
+
+def refuse_test_schemas(cfg) -> None:
+    """⛔ Гейт выдачи: приёмка не судит схему из тестового пространства.
+
+    Команды, чей вердикт человек цитирует заказчику и чью схему он выгружает
+    (`prepare`, `verify`, `report`, `reverse`), обязаны отказать ГРОМКО --
+    кодом 3 и именем схемы, -- а не отпечатать зелёную строку над базой,
+    которую только что перепахал тестовый набор.
+    """
+    reserved = reserved_test_schemas(cfg)
+    if reserved:
+        raise TestSchemaRefused(
+            "конфиг указывает на схемы тестового набора: " + ", ".join(reserved)
+            + f". Префикс `{TEST_SCHEMA_PREFIX}` зарезервирован за `pytest`: такую "
+            "схему пересобирает и сносит тестовый набор, её содержимое -- тестовый "
+            "двойник, а не очищенная база. Наружу выдаётся `work_schema` боевого "
+            "конфига; исправьте `stand.*_schema` в конфиге и повторите."
+        )
 
 # ⛔ Только конструкция владельца ``DEFINER=`user`@`host` `` (со знаком «=») --
 # ⛔ НЕ трогает ``SQL SECURITY DEFINER`` (там после DEFINER нет «=»), это
@@ -173,11 +212,18 @@ def _table_hashes(conn, schema: str) -> dict:
     return out
 
 
-def _digest(conn, schema: str) -> str:
-    """Свод базы: MD5 склейки табличных хешей в порядке имён таблиц (критерий 22)."""
+def schema_digest(conn, schema: str) -> str:
+    """Свод базы: MD5 склейки табличных хешей в порядке имён таблиц (критерий 22).
+
+    ⛔ Публичное имя: этим же сводом тестовый набор меряет РЕЗУЛЬТАТ своей
+    изоляции -- что боевые схемы после `pytest` побайтово те же, что и до него
+    (`tests/conftest.py::combat_schemas_untouched`). Сторож, зовущий приватное
+    имя, ломается от любой правки внутри модуля и молча уходит в skip.
+    """
     hashes = _table_hashes(conn, schema)
     joined = "|".join(hashes[t] for t in sorted(hashes))
     return hashlib.md5(joined.encode("ascii")).hexdigest()
+
 
 
 def passport(cfg) -> StandPassport:
@@ -199,7 +245,7 @@ def passport(cfg) -> StandPassport:
             conn,
             "SELECT @@session.character_set_client c, @@session.character_set_connection x",
         )[0]
-        source_digest = _digest(conn, cfg.stand.source_schema)
+        source_digest = schema_digest(conn, cfg.stand.source_schema)
         return StandPassport(
             work_dsn=cfg.stand.dsn(cfg.stand.work_schema),
             source_dsn=cfg.stand.dsn(cfg.stand.source_schema),

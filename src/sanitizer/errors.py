@@ -96,6 +96,18 @@ class StandNotStrict(GateFailed):
     """sql_mode стенда без STRICT_TRANS_TABLES."""
 
 
+class TestSchemaRefused(GateFailed):
+    """Конфиг указывает на схему из зарезервированного пространства `sanit_test_*`.
+
+    ⛔ Находка независимого судьи 08.09.2026: тестовый набор работал ПОД ИМЕНЕМ
+    боевой схемы (`sanit_work`), и после `pytest` наружу выгружался тестовый
+    двойник вместо очищенной базы. Пространство `sanit_test_*` теперь отдано
+    тестам целиком, а приёмка отказывается судить схему оттуда: молчаливое
+    зелёное над тестовой базой -- ровно тот отказ, который этот инструмент
+    обязан не допускать в месте, которое он защищает.
+    """
+
+
 class DeclarationMissing(GateFailed):
     """Объявление оператора пустое -- отказ по умолчанию (правило 4а)."""
 
@@ -117,5 +129,6 @@ __all__ = [
     "PubGroundMissing",
     "PubCompositionChanged",
     "StandNotStrict",
+    "TestSchemaRefused",
     "DeclarationMissing",
 ]

@@ -74,8 +74,10 @@ def test_same_seed_gives_bit_identical_bases(conn, twin_runs):
     без ORDER BY не определён ни одной СУБД, и «значение -> замена» зависит
     от того, кто попросил первым.
     """
-    a = h.table_hashes(conn, "sanit_seed_a")
-    b = h.table_hashes(conn, "sanit_seed_b")
+    from conftest import schema_for_test
+
+    a = h.table_hashes(conn, schema_for_test("seed_a"))
+    b = h.table_hashes(conn, schema_for_test("seed_b"))
     differing = [t for t in a if a[t] != b[t]]
     assert differing == [], f"прогоны разошлись по таблицам: {differing}"
 
@@ -106,14 +108,15 @@ def test_a_different_seed_gives_a_different_base(config, field_map, admin_conn,
     «уже применено» вместо генерации по своему (другому) seed, и сравнение хешей
     ничего не доказывало бы.
     """
-    from conftest import Pipeline, _cleanup_isolated_paths, _isolated_paths_config
+    from conftest import (Pipeline, _cleanup_isolated_paths, _isolated_paths_config,
+                          schema_for_test)
 
-    schema = "sanit_seed_c"
+    schema = schema_for_test("seed_c")
     cfg = _isolated_paths_config(config, schema)
     p = Pipeline(cfg, field_map, admin_conn, config.stand.source_schema)
     try:
         p.run(work_schema=schema, seed=config.run.seed + 1)
-        a = h.table_hashes(admin_conn, "sanit_seed_a")
+        a = h.table_hashes(admin_conn, schema_for_test("seed_a"))
         c = h.table_hashes(admin_conn, schema)
         assert a["customer"] != c["customer"], "seed не влияет на результат"
     finally:

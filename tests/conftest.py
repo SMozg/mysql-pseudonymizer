@@ -29,7 +29,8 @@ from sanitizer.fieldmap import FieldMap
 from sanitizer.metrics import collision_baseline, take_snapshot
 from sanitizer.models import RunRule
 from sanitizer.runner import Runner
-from sanitizer.stand import make_copy, passport, session_init
+from sanitizer.stand import (TEST_SCHEMA_PREFIX, make_copy, passport,
+                            schema_digest, session_init)
 from sanitizer.verifier import Verifier
 
 from helpers import fakes, sanit
@@ -42,11 +43,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: сессия молча уходила в skip. Тот же класс ложной зелени, что и CI без порта.
 STAND_ENV_FILES = (Path(".env"), Path("demo") / "sakila" / ".env")
 
-SOURCE_SCHEMA = ref.BASE_SCHEMA          # sakila, только чтение
-REF_SCHEMA = "sanit_ref"                 # снимок «ДО»
-WORK_SCHEMA = "sanit_work"               # рабочая копия, её чистит прогон
-RESTORED_SCHEMA = "sanit_restored"       # приёмник обратного прогона (критерий 28)
-SANIT_SCHEMA = "sanit_probe"             # словарь/разрывы/счётчики для запросов-доказательств
+#: ⛔ ВСЁ, ЧТО ЗАВОДИТ НАБОР, ЖИВЁТ ПОД `sanit_test_*` И БОЛЬШЕ НИГДЕ.
+#: Цена правила замерена независимым судьёй 08.09.2026: имена ниже брались из
+#: боевого конфига как есть (`sanit_work`, `sanit_ref`, `sanit_restored`), и
+#: `pytest` затирал ТУ САМУЮ схему, которую README велит отдавать наружу. После
+#: набора в `sanit_work.customer` лежал тестовый двойник (`QXAKNTRCZHNU`), а
+#: `verify` падал с 29 из 29 на 27 из 29 (критерии 20 и 30), код 1. Читатель,
+#: идущий по README сверху вниз -- «прогони тесты» -> «загляни в `sanit_work`» ->
+#: «`mysqldump ... sanit_work` наружу», -- выгружал заказчику тестового двойника
+#: вместо очищенной базы: дефект ровно в том месте, которое инструмент защищает.
+#: Правило держат ТРИ сторожа, и ни один не живёт в README:
+#:   1. `copy_for_test` -- набор физически не умеет завести схему без префикса;
+#:   2. `combat_schemas_untouched` -- свод боевых схем ДО и ПОСЛЕ сессии;
+#:   3. `sanitizer.stand.refuse_test_schemas` -- приёмка не судит схему `sanit_test_*`.
+SOURCE_SCHEMA = ref.BASE_SCHEMA                      # sakila, только чтение
+REF_SCHEMA = TEST_SCHEMA_PREFIX + "ref"              # снимок «ДО»
+WORK_SCHEMA = TEST_SCHEMA_PREFIX + "work"            # рабочая копия, её чистит прогон
+RESTORED_SCHEMA = TEST_SCHEMA_PREFIX + "restored"    # приёмник обратного прогона (критерий 28)
+SANIT_SCHEMA = TEST_SCHEMA_PREFIX + "probe"          # словарь/разрывы/счётчики для доказательств
 
 SECRET_ENV = ("MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "SANIT_KEY", "SANIT_MODEL_KEY")
 
@@ -54,6 +68,102 @@ SECRET_ENV = ("MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "SANIT_KEY", "SANIT_MODEL
 def pytest_configure(config):
     config.addinivalue_line("markers", "db: требует поднятого стенда MySQL")
     config.addinivalue_line("markers", "slow: делает собственную копию базы")
+
+
+# --- изоляция от боевых схем ------------------------------------------------
+
+
+def schema_for_test(*parts: str) -> str:
+    """Имя тестовой схемы: префикс + части, обрезано под лимит MySQL (64 знака)."""
+    tail = "_".join(str(x) for x in parts)
+    tail = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in tail)
+    return (TEST_SCHEMA_PREFIX + tail)[:64]
+
+
+def copy_for_test(src: str, dst: str, *, conn) -> None:
+    """⛔ ЕДИНСТВЕННАЯ ДВЕРЬ, ЧЕРЕЗ КОТОРУЮ НАБОР ЗАВОДИТ СХЕМУ.
+
+    Прямой `make_copy` в тестах и фикстурах запрещён: именно так набор и увёл
+    себе боевое имя `sanit_work`. Здесь стоит проверка, которую нельзя забыть
+    выполнить, -- она в коде, а не в правиле на словах: имя без префикса
+    `sanit_test_` роняет фикстуру ГРОМКО, до первой записи в базу.
+    ⛔ Имя функции НЕ `test_copy`: любой модуль, импортирующий её по имени,
+    отдал бы её pytest как тест (и «прошедший» -- он ничего не проверяет).
+    """
+    if not dst.startswith(TEST_SCHEMA_PREFIX):
+        raise RuntimeError(
+            f"тестовая схема обязана начинаться с {TEST_SCHEMA_PREFIX!r}, получено {dst!r}. "
+            f"Набор не заводит схем вне своего пространства: имена боевого конфига "
+            f"(work/ref/restored) под тестами затираются, и наружу уезжает тестовый двойник."
+        )
+    make_copy(src, dst, conn=conn)
+
+
+def _combat_schemas() -> tuple:
+    """Боевые схемы -- ИЗ БОЕВОГО КОНФИГА, а не списком здесь.
+
+    ⛔ Список константой рассинхронизируется с `config/config.yaml` молча, и
+    сторож начинает стеречь схемы, которых уже нет, -- зелёный над непроверенным.
+    """
+    combat = yaml.safe_load((REPO_ROOT / "config" / "config.yaml").read_text(encoding="utf-8"))
+    stand_cfg = combat["stand"]
+    names = [stand_cfg[k] for k in
+             ("source_schema", "work_schema", "ref_schema", "restored_schema")]
+    return tuple(sorted({n for n in names if not n.startswith(TEST_SCHEMA_PREFIX)}))
+
+
+def _combat_state(conn) -> dict:
+    """Свод каждой боевой схемы (или отметка «нет схемы») -- один замер."""
+    present = {r["SCHEMA_NAME"] for r in db.rows(
+        conn, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA")}
+    return {name: (schema_digest(conn, name) if name in present else "нет схемы")
+            for name in _combat_schemas()}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def combat_schemas_untouched(admin_conn):
+    """⛔ ГЛАВНЫЙ СТОРОЖ ИЗОЛЯЦИИ: меряет РЕЗУЛЬТАТ, а не намерение.
+
+    Свод боевых схем (`sakila`, `sanit_work`, `sanit_ref`, `sanit_restored`)
+    снимается ДО первого теста и ПОСЛЕ последнего тем же инструментом, каким
+    критерий 22 стережёт неизменность исходной базы. Разошёлся хоть один --
+    сессия падает с именем схемы. Правило «тесты не трогают боевое» перестаёт
+    быть обещанием в комментарии: его каждый прогон подтверждает числом.
+    ⛔ `autouse` + сессионная область: сторож встаёт РАНЬШЕ любой фикстуры,
+    которая заводит копии (`ref_schema`, `pipeline`, `twin_runs`), потому что
+    те ленивые и строятся по первому требованию теста.
+    """
+    before = _combat_state(admin_conn)
+    yield
+    after = _combat_state(admin_conn)
+    drift = [name for name in before if before[name] != after[name]]
+    if drift:
+        pytest.fail(
+            "⛔ ТЕСТОВЫЙ НАБОР ИЗМЕНИЛ БОЕВЫЕ СХЕМЫ: " + ", ".join(drift)
+            + ". Наружу из них выдаётся очищенная база -- после такого прогона там "
+              "лежит тестовый двойник. Все копии набора обязаны идти через "
+              "`copy_for_test`/`schema_for_test` (префикс " + TEST_SCHEMA_PREFIX + ").",
+            pytrace=False,
+        )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def sweep_test_schemas(admin_conn):
+    """Снос ВСЕГО тестового пространства за собой -- и после падения тоже.
+
+    ⛔ Сносим по ПРЕФИКСУ, а не поимённо: поимённый список стареет молча, а
+    схема, забытая упавшим тестом, доживает до следующего прогона и до чужих
+    глаз. Один запрос к `information_schema` покрывает и те имена, которых
+    ещё не существует.
+    """
+    yield
+    rows = db.rows(
+        admin_conn,
+        "SELECT SCHEMA_NAME n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE %s",
+        (TEST_SCHEMA_PREFIX + "%",),
+    )
+    for row in rows:
+        db.execute(admin_conn, f"DROP DATABASE IF EXISTS `{row['n']}`")
 
 
 # --- окружение --------------------------------------------------------------
@@ -165,7 +275,7 @@ def field_map(config) -> FieldMap:
 @pytest.fixture(scope="session")
 def ref_schema(admin_conn, config) -> str:
     """Снимок «ДО» отдельной схемой -- эталон всех сравнений (соглашение §1 п. 1)."""
-    make_copy(config.stand.source_schema, REF_SCHEMA, conn=admin_conn)
+    copy_for_test(config.stand.source_schema, REF_SCHEMA, conn=admin_conn)
     return REF_SCHEMA
 
 
@@ -224,9 +334,8 @@ def cli_isolated_config(tmp_path_factory, admin_conn, config, request):
     схема с уникальным именем, СВОИ артефакты (словарь/журнал/отчёт/снимки),
     снос в `finally` при любом исходе теста.
     """
-    schema = "sanit_cli_" + request.node.name.replace("[", "_").replace("]", "")[-40:]
-    schema = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in schema)[:60]
-    make_copy(config.stand.source_schema, schema, conn=admin_conn)
+    schema = schema_for_test("cli", request.node.name[-40:])
+    copy_for_test(config.stand.source_schema, schema, conn=admin_conn)
     workdir = tmp_path_factory.mktemp("cli_" + schema[-20:])
     text = f"""
 stand:
@@ -283,7 +392,7 @@ class Pipeline:
         cfg = self.config.with_overrides(work_schema=work_schema)
         source = from_schema or self.source
         if source != work_schema:          # копия «на себя» -- не копия, а потеря данных
-            make_copy(source, work_schema, conn=self.conn)
+            copy_for_test(source, work_schema, conn=self.conn)
         rule = RunRule(
             seed=seed if seed is not None else cfg.run.seed,
             batch_size=batch_size or cfg.run.batch_size,
@@ -454,7 +563,7 @@ def twin_runs(config, field_map, admin_conn, ref_schema):
     в собственном тесте -- сверка идёт с чужим прогоном.
     """
     made = []
-    for schema in ("sanit_seed_a", "sanit_seed_b"):
+    for schema in (schema_for_test("seed_a"), schema_for_test("seed_b")):
         cfg = _isolated_paths_config(config, schema)
         p = Pipeline(cfg, field_map, admin_conn, config.stand.source_schema)
         p.run(work_schema=schema, seed=config.run.seed)
@@ -462,7 +571,7 @@ def twin_runs(config, field_map, admin_conn, ref_schema):
     try:
         yield made
     finally:
-        for schema in ("sanit_seed_a", "sanit_seed_b"):
+        for schema in (schema_for_test("seed_a"), schema_for_test("seed_b")):
             db.execute(admin_conn, f"DROP DATABASE IF EXISTS {schema}")
             _cleanup_isolated_paths(_isolated_paths_config(config, schema))
 
@@ -497,8 +606,7 @@ def case_pipeline(config, field_map, admin_conn, ref_schema, request):
     Каждому тесту -- свой `dict.enc`; снос -- в `finally`, и при падении теста тоже,
     иначе мусор копится и следующий прогон стартует с грязного каталога.
     """
-    schema = "sanit_case_" + request.node.name.replace("[", "_").replace("]", "")[-40:]
-    schema = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in schema)[:60]
+    schema = schema_for_test("case", request.node.name[-40:])
     case_cfg = _isolated_paths_config(config, schema)
     p = Pipeline(case_cfg, field_map, admin_conn, config.stand.source_schema)
     p.schema = schema

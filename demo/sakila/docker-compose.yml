@@ -43,7 +43,13 @@ services:
       - ./initdb:/docker-entrypoint-initdb.d:ro
       - sakila-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      # ⛔ НЕ `mysqladmin ping`: он меряет, что сервер ОТВЕТИЛ, а не что нас
+      # пустили. С неверным паролем ping печатает "Access denied" и выходит
+      # КОДОМ 0 -- контейнер встаёт `healthy` над сервером, в который ни одна
+      # команда инструмента войти не может (замерено независимым судьёй
+      # 08.09.2026). Проверка ниже выполняет НАСТОЯЩИЙ запрос под тем же
+      # паролем, каким пойдёт санитайзер: не пустили -- не `healthy`.
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 30

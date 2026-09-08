@@ -412,9 +412,9 @@ def test_already_changed_cell_without_a_record_stops_the_run(conn, case_pipeline
     -> по ячейке прошёл кто-то ещё, или обрыв съел запись -> громкая остановка.
     Тихое продолжение приняло бы замену за исходное и убило бы обратимость.
     """
-    from sanitizer.stand import make_copy
+    from conftest import copy_for_test
 
-    make_copy(ref_schema, case_pipeline.schema, conn=conn)
+    copy_for_test(ref_schema, case_pipeline.schema, conn=conn)
     db.execute(conn, f"UPDATE {case_pipeline.schema}.customer "
                      f"SET first_name='Qzzmarker', last_name=last_name, "
                      f"last_update=last_update WHERE customer_id=1")
@@ -429,9 +429,9 @@ def test_third_state_of_a_cell_is_an_anomaly(conn, case_pipeline, ref_schema, sa
     З сравнивает ТРОЙКУ, а не пару: иначе «уже применено» и «по ячейке прошёл
     кто-то ещё» неразличимы.
     """
-    from sanitizer.stand import make_copy
+    from conftest import copy_for_test
 
-    make_copy(ref_schema, case_pipeline.schema, conn=conn)
+    copy_for_test(ref_schema, case_pipeline.schema, conn=conn)
     case_pipeline.run(work_schema=case_pipeline.schema, from_schema=case_pipeline.schema)
     db.execute(conn, f"UPDATE {case_pipeline.schema}.customer "
                      f"SET first_name='Qzzalien', last_update=last_update "

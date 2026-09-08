@@ -69,6 +69,16 @@ CREATE TABLE {schema}.calls_log (
 
 
 def rebuild(conn, schema: str) -> None:
+    """⛔ `DROP DATABASE` по имени из аргумента -- второй после `make_copy` путь,
+    которым набор способен снести боевую схему. Тот же барьер, что в
+    `conftest.copy_for_test`: пространство `sanit_test_*` и ничего кроме."""
+    from sanitizer.stand import TEST_SCHEMA_PREFIX
+
+    if not schema.startswith(TEST_SCHEMA_PREFIX):
+        raise RuntimeError(
+            f"схема доказательств обязана начинаться с {TEST_SCHEMA_PREFIX!r}, "
+            f"получено {schema!r}: набор не сносит и не заводит боевых схем."
+        )
     db.execute(conn, f"DROP DATABASE IF EXISTS {schema}")
     db.execute(conn, f"CREATE DATABASE {schema} DEFAULT CHARSET=utf8mb4 "
                      f"COLLATE=utf8mb4_0900_ai_ci")
