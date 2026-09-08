@@ -12,11 +12,17 @@
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import helpers as h
+from helpers import fakes, sanit
 from helpers import queries as Q
 from helpers import reference as R
+from sanitizer import db
+from sanitizer.stand import TEST_SCHEMA_PREFIX, passport
+from sanitizer.verifier import Verifier
 
 pytestmark = [pytest.mark.db]
 
@@ -199,31 +205,99 @@ def test_c26_merges_are_counted_not_forbidden(conn, sanit_schema, cur):
         f"склеек {len(glued)} больше, чем выдано замен ({issued}) -- счёт не сходится")
 
 
+#: Приёмники ЭТОГО теста: словарь склеенного прогона (доказательства критерия 26)
+#: и схема обратного прогона. ⛔ Оба под `sanit_test_*` -- иначе `sanit.rebuild`
+#: и общий сметальщик сессии до них не дотянутся, а `make_copy` внутри `reverse`
+#: завёл бы схему вне тестового пространства.
+MERGE_PROBE_SCHEMA = TEST_SCHEMA_PREFIX + "merge_probe"
+MERGE_BACK_SCHEMA = TEST_SCHEMA_PREFIX + "merge_back"
+
+
+@pytest.mark.slow
 def test_c26_a_merged_replacement_still_reverses_to_its_own_original(
-    conn, sanit_schema, cur, ref_schema
+    admin_conn, case_pipeline, ref_schema
 ):
     """📌 СВОЙСТВО, РАДИ КОТОРОГО СКЛЕЙКА ВООБЩЕ ДОПУСТИМА.
 
-    Удалить проверку мало -- надо доказать, что удалённое ничего не держало.
-    Держала бы она обратимость, если бы запись словаря была заведена на ЗНАЧЕНИЕ:
-    тогда общая замена не знала бы, какое из двух исходных вернуть. Запись
-    заведена на ЯЧЕЙКУ, и потому у каждой склеенной ячейки СВОЙ путь назад.
-    Тест берёт склеенные замены (если прогон их дал) и требует, чтобы по каждой
-    из них словарь хранил столько же записей, сколько ячеек, и чтобы исходные
-    значения этих записей совпадали с базой «ДО» поимённо.
-    ⛔ Если склеек не случилось -- тест не молчит, а говорит об этом: проверять
-    нечего, и это факт прогона, а не зелёный результат проверки.
+    Снять с критерия 26 требование «склеек ноль» было мало -- надо доказать, что
+    снятое ничего не держало. Держало бы оно обратимость, будь запись словаря
+    заведена на ЗНАЧЕНИЕ: общая замена не знала бы, какое из двух исходных
+    вернуть. Запись заведена на ЯЧЕЙКУ, и потому у каждой склеенной ячейки СВОЙ
+    путь назад.
+
+    ⛔ ПОЧЕМУ ТЕСТ СТАВИТ СКЛЕЙКУ САМ (правка 08.09). Прежняя редакция брала
+    склейки из сессионного прогона и звала `pytest.skip`, когда их не случилось.
+    Конструкция негодная дважды. Во-первых, сторож CI (`.github/ci_gate.py`)
+    роняет сборку на ЛЮБОМ пропуске -- бейдж краснел не по делу. Во-вторых, после
+    починки критерия 12 склейка стала ИСХОДОМ, а не нормой: сегодня их ноль, и
+    тест тем надёжнее молчал, чем лучше работает продукт. Проверка, которая
+    выключается от исправности предмета, -- не проверка.
+    Склейку ставит двойник поставщика (`fakes.MODE_MERGE_FOREVER`) -- ТОТ ЖЕ
+    механизм, что у `tests/failure/test_merge_policy.py`, второго заводить не
+    надо: две ячейки `address.district` (класс КЗ-4) с РАЗНЫМИ исходными
+    получают ОДНУ замену, потому что поставщик не даёт ячейке ничего другого ни
+    на одной из попыток, и предохранитель последней попытки принимает занятое.
+    ⛔ Обратимость меряется боевым `Verifier.reverse`, а не пересчётом словаря
+    внутри теста: проверяется то, что получит заказчик.
     """
-    glued = h.rows(conn, h.q(Q.C26_GLUED_PAIRS, cur=cur, sanit=sanit_schema))
-    if not glued:
-        pytest.skip("прогон не дал ни одной склейки -- проверять нечего")
-    for g in glued[:20]:
-        records = h.rows(conn, h.q(
+    provider = fakes.FakeModelProvider(mode=fakes.MODE_MERGE_FOREVER)
+    case_pipeline.run(work_schema=case_pipeline.schema, provider=provider)
+    pair = provider.merge_pair
+    assert len(pair) == 2, "двойник не назначил пару склейки -- тест ничего не проверял"
+
+    cur = case_pipeline.schema
+    try:
+        # --- склейка видна ТЕМ ЖЕ запросом, которым критерий 26 ищет её в поставке
+        sanit.load(admin_conn, MERGE_PROBE_SCHEMA, case_pipeline.dictionary)
+        glued = h.rows(admin_conn, h.q(Q.C26_GLUED_PAIRS, cur=cur, sanit=MERGE_PROBE_SCHEMA))
+        assert len(glued) == 1, (
+            f"поставлена ровно одна склейка, а запрос доказательств нашёл {len(glued)}: "
+            f"{[(g['cls'], g['new_val'], g['n']) for g in glued]}")
+        g = glued[0]
+        assert g["n"] == 2, f"склейка обязана обслуживать РОВНО два исходных, а не {g['n']}"
+
+        # --- путь назад существует: запись словаря на КАЖДУЮ ячейку, исходные различны
+        records = h.rows(admin_conn, h.q(
             "SELECT entity_table, entity_pk, col, old_val FROM {sanit}.dict "
             "WHERE cls=%s AND new_val COLLATE utf8mb4_0900_ai_ci = %s",
-            cur=cur, sanit=sanit_schema), (g["cls"], g["new_val"]))
+            cur=cur, sanit=MERGE_PROBE_SCHEMA), (g["cls"], g["new_val"]))
+        # ⛔ Записей БОЛЬШЕ, чем исходных, и это норма: запись заведена на ЯЧЕЙКУ,
+        # а одно исходное значение живёт в нескольких ячейках (охват, Р-45).
+        # Требование -- «не меньше»: путь назад обязан быть у каждой ячейки.
         assert len(records) >= g["n"], (
             f"замена {g['new_val']!r} класса {g['cls']} обслуживает {g['n']} разных "
             f"исходных, а записей словаря {len(records)} -- путь назад потерян")
         assert len({r["old_val"] for r in records}) == g["n"], (
             f"замена {g['new_val']!r}: записи словаря не различают исходные значения")
+
+        # --- в базе обе ячейки действительно несут ОДНО значение, а исходные -- РАЗНЫЕ
+        originals, after = [], []
+        for table, pk, column in pair:
+            originals.append(h.scalar(admin_conn, h.q(
+                f"SELECT {column} v FROM {{cur}}.{table} WHERE {table}_id=%s",
+                cur=ref_schema), (pk[0],)))
+            after.append(h.scalar(admin_conn, h.q(
+                f"SELECT {column} v FROM {{cur}}.{table} WHERE {table}_id=%s",
+                cur=cur), (pk[0],)))
+        assert originals[0] != originals[1], (
+            f"пара склейки обязана нести РАЗНЫЕ исходные, получено {originals!r}: "
+            f"у одинаковых охват один (Р-45), и общая замена не была бы склейкой")
+        assert after[0] == after[1] == g["new_val"], (
+            f"склейки в базе нет: {after!r} против замены {g['new_val']!r} -- "
+            f"проверять обратимость склеенной замены не на чем")
+
+        # --- ГЛАВНОЕ: боевой обратный прогон вернул КАЖДОЙ ячейке ЕЁ СОБСТВЕННОЕ исходное
+        verifier = Verifier(passport=passport(case_pipeline.cfg), snapshot=None,
+                            baseline=None, fmap=None,
+                            dictionary=case_pipeline.dictionary, runlog=None)
+        verifier.reverse(MERGE_BACK_SCHEMA, key=bytes.fromhex(os.environ["SANIT_KEY"]))
+        for (table, pk, column), was in zip(pair, originals):
+            back = h.scalar(admin_conn, h.q(
+                f"SELECT {column} v FROM {{cur}}.{table} WHERE {table}_id=%s",
+                cur=MERGE_BACK_SCHEMA), (pk[0],))
+            assert back == was, (
+                f"{table}.{column} (PK {pk[0]}) вернулось как {back!r}, а исходное -- {was!r}: "
+                f"общая замена {g['new_val']!r} не развела свои ячейки, обратимость потеряна")
+    finally:
+        for schema in (MERGE_PROBE_SCHEMA, MERGE_BACK_SCHEMA):
+            db.execute(admin_conn, f"DROP DATABASE IF EXISTS `{schema}`")
