@@ -161,7 +161,7 @@ def test_batch_composition_is_deterministic(config, field_map, admin_conn, ref_s
     """Два прогона при одном N и одном seed нарезают ОДИНАКОВЫЕ пакеты.
 
     При разном составе пакетов два прогона разойдутся побитово,
-    и критерий 21 станет недоказуем.
+    и детерминизм сборки станет недоказуем.
     """
     from conftest import Pipeline
     from sanitizer import db
@@ -235,7 +235,7 @@ def test_gateway_that_rejects_seed_does_not_break_the_run(monkeypatch, config, c
 
     ⛔ Тест требует ДВУХ вещей сразу: прогон дошёл до ответа И потеря
     повторяемости названа вслух. Молча упавшая до `temperature=0` замена
-    сделала бы вердикт критерия 21 нечитаемым.
+    сделала бы разброс прогонов необъяснимым.
     """
     from sanitizer.providers import model as model_mod
 

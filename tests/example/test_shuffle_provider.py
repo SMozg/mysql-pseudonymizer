@@ -59,7 +59,7 @@ def test_lengths_match_the_originals_letter_for_letter():
 
 
 def test_the_same_seed_gives_the_same_permutation():
-    """Критерий 21: два прогона с одним seed обязаны совпасть побитово."""
+    """Свойство инструмента: два прогона с одним seed обязаны совпасть побитово."""
     a = _first(ShuffleProvider(5).supply(_batch(VALUES, seed=42)))
     b = _first(ShuffleProvider(5).supply(_batch(VALUES, seed=42)))
     assert a == b
@@ -143,7 +143,7 @@ def test_the_permutation_depends_on_the_secret_key(monkeypatch):
 
 
 def test_the_same_key_and_seed_give_the_same_permutation(monkeypatch):
-    """Критерий 21: два прогона с одним ключом и одним seed обязаны совпасть."""
+    """Свойство инструмента: два прогона с одним ключом и одним seed совпадают."""
     monkeypatch.setenv("SANIT_KEY", "cc" * 32)
     assert (_first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1", seed=42)))
             == _first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1", seed=42))))

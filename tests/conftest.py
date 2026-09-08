@@ -440,7 +440,8 @@ def second_run(pipeline, sanitized, hashes_after_first_run):
 
 @pytest.fixture(scope="session")
 def twin_runs(config, field_map, admin_conn, ref_schema):
-    """Два прогона с одного исходника при одном seed (критерий 21).
+    """Два прогона с одного исходника при одном seed (детерминизм инструмента;
+    критерий 21 снят 08.09, свойство осталось и проверяется тестами).
 
     ⛔ Изоляция ПОЛНАЯ и от сессионного прогона (`sanitized`/`pipeline`), и друг
     от друга: A и B делят словарь -- B не воспроизводит замену заново по seed,

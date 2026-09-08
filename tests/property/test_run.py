@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 from pathlib import Path
@@ -17,7 +18,10 @@ import helpers as h
 from helpers import queries as Q
 from helpers import reference as R
 from sanitizer import errors
+from sanitizer.calls import CallLog
+from sanitizer.calls import read as read_calls
 from sanitizer.dictionary import Dictionary
+from sanitizer.metrics import snapshot_from_dict
 
 pytestmark = [pytest.mark.db, pytest.mark.slow]
 
@@ -55,11 +59,16 @@ def test_c20_second_run_asked_the_provider_for_nothing(second_run):
     assert spent == 0, f"второй прогон заказал {spent} значений заново"
 
 
-# --- критерий 21 ------------------------------------------------------------
+# --- детерминизм инструмента (не критерий приёмки) ---------------------------
 
 
-def test_c21_same_seed_gives_bit_identical_bases(conn, twin_runs):
+def test_same_seed_gives_bit_identical_bases(conn, twin_runs):
     """Два прогона с одного исходника при одном seed -- 16 из 16 хешей равны.
+
+    ⛔ Это СВОЙСТВО ИНСТРУМЕНТА, а не критерий приёмки: критерий 21 снят 08.09
+    (побитовое совпадение противоречит требованию «ЛЛМ для логичных замен»).
+    Тест стоит на детерминированном двойнике поставщика, стоит ноль и доказывает
+    отсутствие скрытого состояния -- часов, энтропии, порядка обхода строк.
 
     Seed без явного порядка обхода детерминизма не даёт: порядок чтения строк
     без ORDER BY не определён ни одной СУБД, и «значение -> замена» зависит
@@ -71,8 +80,12 @@ def test_c21_same_seed_gives_bit_identical_bases(conn, twin_runs):
     assert differing == [], f"прогоны разошлись по таблицам: {differing}"
 
 
-def test_c21_dictionaries_match_record_for_record(twin_runs):
-    """И словарь тот же, запись в запись: каждая запись встречается ровно дважды."""
+def test_dictionaries_match_record_for_record(twin_runs):
+    """И словарь тот же, запись в запись: каждая запись встречается ровно дважды.
+
+    ⛔ Свойство инструмента, а не критерий приёмки (критерий 21 снят 08.09): на
+    детерминированном двойнике словарь обязан собраться байт в байт, иначе в
+    сборке живёт скрытое состояние."""
     def as_set(pipe):
         return {(r.entity_table, r.entity_pk, r.col, r.new_val)
                 for r in pipe.dictionary.records()}
@@ -83,11 +96,11 @@ def test_c21_dictionaries_match_record_for_record(twin_runs):
         f"только справа {len(right - left)}")
 
 
-def test_c21_a_different_seed_gives_a_different_base(config, field_map, admin_conn,
-                                                     ref_schema, twin_runs):
-    """Обратная сторона: другой seed обязан дать ДРУГУЮ базу.
+def test_a_different_seed_gives_a_different_base(config, field_map, admin_conn,
+                                                 ref_schema, twin_runs):
+    """Обратная сторона того же свойства: другой seed обязан дать ДРУГУЮ базу.
 
-    Без этого «повторяемость» доказывалась бы кодом, который вообще не смотрит на seed.
+    Без этого детерминизм доказывался бы кодом, который вообще не смотрит на seed.
     ⛔ Свой словарь/журнал/отчёт/снимки (`_isolated_paths_config`) -- тот же дефект
     изоляции, что и в `twin_runs`: делить `dict.enc` с A значило бы, что C видит
     «уже применено» вместо генерации по своему (другому) seed, и сравнение хешей
@@ -127,6 +140,36 @@ def test_c22_reference_snapshot_also_intact(conn, ref_schema, sanitized):
     assert h.digest(conn, ref_schema) == R.DIGEST_BEFORE
 
 
+# --- артефакты прогона: снимок «ПОСЛЕ» ---------------------------------------
+
+
+def test_run_writes_the_after_snapshot(sanitized):
+    """Снимок «ПОСЛЕ» лежит на диске, читается БОЕВЫМ кодеком, и его свод -- тот же.
+
+    ⛔ Правка 08.09: `paths.snapshot_after` был объявлен в конфиге с самого начала,
+    а файла не создавал НИКТО -- `prepare` пишет «ДО», «ПОСЛЕ» некому. Объявленный
+    путь без файла -- обещание, которое никто не исполняет, и заметить это можно
+    было только руками.
+    ⛔ Читается ИМЕННО `snapshot_from_dict` -- тем же кодеком, каким снимок читает
+    `verify`. Причина названа замером: при переносе кодека из `cli.py` в `metrics.py`
+    он ломался (`NameError: Decimal`), и ни один из 199 тестов этого не увидел --
+    команды `verify`/`reverse` через CLI не покрыты, а круговой ход «записал ->
+    прочитал» до сегодня не проверялся вовсе. Сломать его снова, не покраснев,
+    теперь нельзя.
+    """
+    path = Path(sanitized.cfg.paths.snapshot_after)
+    assert path.is_file(), f"снимок «ПОСЛЕ» не создан: {path.name}"
+    snap = snapshot_from_dict(json.loads(path.read_text(encoding="utf-8")))
+    assert snap.phase == "after", f"фаза снимка {snap.phase!r}, а не 'after'"
+    assert snap.digest == sanitized.result.cleaned_digest, (
+        "свод сохранённого снимка «ПОСЛЕ» не тот, что вернул прогон")
+    # ⛔ Decimal и кортежные ключи -- то самое, что «из коробки» в JSON не ложится:
+    # именно на них кодек и ломается, поэтому они названы поимённо, а не подразумеваются.
+    assert snap.money[0] > 0, "деньги не пережили сериализацию (Decimal)"
+    assert all(isinstance(k, tuple) and len(k) == 3 for k in snap.secret_fingerprints), (
+        "кортежные ключи отпечатков секретов не пережили сериализацию")
+
+
 # --- критерий 23 ------------------------------------------------------------
 
 
@@ -134,32 +177,64 @@ def _dict_path(sanitized) -> Path:
     return Path(sanitized.cfg.paths.dictionary).resolve()
 
 
-def _is_dictionary_file(p: Path) -> bool:
-    """Любой `dict*.enc` -- шифрованный словарь: главный `dict.enc` ИЛИ изолированный
-    (`dict_sanit_seed_a.enc` у twin_runs, `dict_sanit_case_*.enc` у case_pipeline).
-    Их в общем каталоге прогона несколько (изоляция критерия 20/21), и все они --
-    один и тот же класс файла для этого обхода."""
-    return p.stem.startswith("dict") and p.suffix == ".enc"
+def _is_fernet_ciphertext(p: Path) -> bool:
+    """Файл -- шифрованный артефакт прогона: КАЖДАЯ непустая строка Fernet-токен.
+
+    ⛔ ДЕФЕКТ 3 (правка 08.09). Раньше здесь стоял `_is_dictionary_file` --
+    исключение ПО ИМЕНИ и только для `dict*.enc`. Журнал вызовов поставщика
+    (`calls.enc`, `sanitizer/calls.py`) -- артефакт ТОГО ЖЕ КЛАССА (Fernet, тот
+    же `SANIT_KEY`, те же исходные значения внутри запроса), но под другим
+    именем, и в обход он попадал. Байтовый поиск по шифротексту -- лотерея:
+    ЗАМЕРЕНО на записях реального размера -- регексп `sk-[A-Za-z0-9_-]{20,}`
+    срабатывает 3.1 раза на мегабайт base64-шума, то есть на боевом журнале в
+    мегабайт тест краснеет почти всегда (39 файлов из 40 на 40 разных ключах),
+    а зеленеет тогда, когда случайным байтам не повезло. Правка критерия 12
+    сменила шифротекст -- совпадение пропало, и тест позеленел сам, не изменившись
+    ни на строку. Гейт, зеленеющий от смены случайных байт, -- не гейт.
+
+    ⛔ ПОЧЕМУ ПРИЗНАК, А НЕ СПИСОК ИМЁН. Исключение по имени (`dict*`, `calls*`)
+    было бы дырой в обратную сторону: файл с ПД, случайно названный `*.enc`, ушёл
+    бы из-под проверки НЕПРОВЕРЕННЫМ. Исключается только то, что ДОКАЗАНО
+    зашифровано: первый байт каждой строки после base64 -- версия Fernet `0x80`.
+    Открытый текст с таким именем остаётся в обходе и краснеет, как и положено.
+    Защищённость самих шифрованных артефактов проверяется отдельно и по-другому --
+    `test_c23_dictionary_is_really_encrypted`, `test_c23_call_log_is_really_encrypted`.
+    """
+    if p.suffix != ".enc":
+        return False
+    lines = [ln for ln in p.read_bytes().split(b"\n") if ln.strip()]
+    if not lines:
+        return False  # пустой файл нечего исключать -- пусть идёт в обход
+    for line in lines:
+        try:
+            if base64.urlsafe_b64decode(line[:8])[0] != 0x80:
+                return False
+        except Exception:  # noqa: BLE001 -- не декодировалось, значит не Fernet
+            return False
+    return True
 
 
 def _run_files(sanitized) -> list[Path]:
     """Файлы прогона, читаемые как ОТКРЫТЫЙ текст: журнал, отчёт, снимки, конфиг.
 
-    ⛔ Дефекты 1/2 (правка): шифрованный словарь (ЛЮБОЙ `dict*.enc`, см.
-    `_is_dictionary_file`) сюда НЕ входит. Его содержимое -- base64
-    Fernet-шифротекста; байтовый поиск исходных значений/ключей ПО ШИФРОТЕКСТУ
-    ложно срабатывает на случайных совпадениях коротких подстрок в шуме base64 --
-    тест обещал «исходных данных на диске нет», а мерил случайное совпадение байтов
-    в тексте, который и ОБЯЗАН отличаться от исходного (это же шифрование).
-    Настоящая гарантия для словаря -- отдельно, `test_c23_dictionary_is_really_encrypted`:
-    признак Fernet и невозможность прочитать без ключа.
+    ⛔ Дефекты 1/2/3 (правка): шифрованные артефакты прогона -- словарь
+    (`dict*.enc`) И журнал вызовов поставщика (`calls.enc`), то есть всё, что
+    `_is_fernet_ciphertext` ПРИЗНАЛ шифротекстом, -- сюда НЕ входят. Их
+    содержимое -- base64 Fernet-шифротекста; байтовый поиск исходных
+    значений/ключей ПО ШИФРОТЕКСТУ ложно срабатывает на случайных совпадениях
+    коротких подстрок в шуме base64 -- тест обещал «исходных данных на диске
+    нет», а мерил случайное совпадение байтов в тексте, который и ОБЯЗАН
+    отличаться от исходного (это же шифрование). Настоящая гарантия для каждого
+    из них -- свой тест: `test_c23_dictionary_is_really_encrypted`,
+    `test_c23_call_log_is_really_encrypted` (признак Fernet и невозможность
+    прочитать посторонним ключом).
     """
     paths = [Path(sanitized.cfg.paths.runlog), Path(sanitized.cfg.paths.report),
              Path(sanitized.cfg.paths.snapshot_before),
              Path(sanitized.cfg.paths.snapshot_after)]
     folder = Path(sanitized.cfg.paths.runlog).parent
     paths += [p for p in folder.rglob("*") if p.is_file()]
-    return [p for p in dict.fromkeys(paths) if p.exists() and not _is_dictionary_file(p)]
+    return [p for p in dict.fromkeys(paths) if p.exists() and not _is_fernet_ciphertext(p)]
 
 
 def _is_ascii_alnum_byte(b: int) -> bool:
@@ -196,10 +271,11 @@ def test_c23_no_source_pd_appears_in_any_run_file(sanitized):
 
     ⛔ Искать надо по ВСЕМ открытым файлам, не только по stdout: по логу
     восстанавливается связь «новое ↔ исходное».
-    ⛔ Шифрованный словарь в этот обход НЕ входит (см. `_run_files`): байтовый
-    поиск по шифротексту ловит случайный шум, а не утечку. Его защищённость
-    проверяет `test_c23_dictionary_is_really_encrypted` -- другим способом,
-    подходящим именно шифрованному файлу.
+    ⛔ Шифрованные артефакты (словарь, журнал вызовов) в этот обход НЕ входят
+    (см. `_run_files`): байтовый поиск по шифротексту ловит случайный шум, а не
+    утечку. Их защищённость проверяют `test_c23_dictionary_is_really_encrypted`
+    и `test_c23_call_log_is_really_encrypted` -- другим способом, подходящим
+    именно шифрованному файлу.
     ⛔ Совпадение засчитывается, только если иголка -- отдельный токен (см.
     `_has_isolated_occurrence`): короткие числовые иголки (индекс/телефон)
     иначе ложно ловятся ВНУТРИ не связанных чисел отчёта (счётчики, хеши).
@@ -242,6 +318,42 @@ def test_c23_dictionary_is_really_encrypted(sanitized):
         Dictionary.open(path, key=wrong_key, passport=sanitized.dictionary.passport)
 
 
+def test_c23_call_log_is_really_encrypted(sanitized):
+    """Журнал вызовов поставщика на диске -- Fernet-шифротекст и посторонним ключом не читается.
+
+    ⛔ ДЕФЕКТ 3 (правка 08.09), парный к `test_c23_dictionary_is_really_encrypted`.
+    `calls.enc` несёт ПД (текст запроса к модели -- это исходные значения) и
+    шифруется тем же `SANIT_KEY`, но в обходе `_run_files` он до сегодняшнего дня
+    стоял как ОТКРЫТЫЙ файл: его защищённость «доказывалась» байтовым поиском по
+    шифротексту, то есть лотереей на случайных совпадениях base64 (замер --
+    в докстринге `_is_fernet_ciphertext`). Здесь -- те же две ПРЯМЫЕ проверки,
+    что у словаря: (1) каждая строка и правда Fernet-токен (версия `0x80` первым
+    байтом после base64 -- это формат, а не эвристика), (2) посторонний ключ
+    не читает ни одной записи, а свой -- читает.
+    ⛔ Пропуска (skip) здесь нет: прогон с замоканным транспортом мог не сделать
+    ни одного сетевого вызова, и тогда файла нет -- но проверить ФОРМУ артефакта
+    всё равно обязаны. Запись в этом случае делается ТЕМ ЖЕ боевым кодом
+    (`CallLog`), которым её пишет настоящий прогон, а не собирается в тесте руками.
+    """
+    path = Path(sanitized.cfg.paths.calls_path())
+    key = bytes.fromhex(os.environ["SANIT_KEY"])
+    if not path.is_file():
+        CallLog.open(path, key=key).append({"проба": "формат журнала вызовов"})
+
+    lines = [ln for ln in path.read_bytes().split(b"\n") if ln.strip()]
+    assert lines, "журнал вызовов пуст -- проверять нечего"
+    for n, line in enumerate(lines):
+        head = base64.urlsafe_b64decode(line[:8])  # 8 base64-символов -> 6 байт
+        assert head[0] == 0x80, (
+            f"строка {n} журнала вызовов -- не Fernet-токен (первый байт {head[0]:#x})")
+
+    wrong_key = bytes((b + 1) % 256 for b in key)
+    assert list(read_calls(path, key=wrong_key)) == [], (
+        "журнал вызовов открылся ПОСТОРОННИМ ключом")
+    assert list(read_calls(path, key=key)), (
+        "журнал вызовов не читается и СВОИМ ключом -- проверка выше ничего не значит")
+
+
 def test_c23_no_dictionary_record_leaked_into_the_log(sanitized):
     """Записи словаря (новые значения) в журнал не попадают."""
     log = Path(sanitized.cfg.paths.runlog).read_text(encoding="utf-8", errors="ignore")
@@ -255,14 +367,15 @@ def test_c23_no_secret_and_no_key_on_disk(sanitized):
 
     ⛔ Р-72: ключ живёт в переменной окружения. Файлов .key/.pem/.env
     прогон не создаёт, и sk-подобных строк в открытых файлах нет.
-    ⛔ Дефект 2 (правка): шифрованный словарь из этого поиска исключён тем же
-    `_run_files` -- регексп `sk-[A-Za-z0-9_-]{20,}` ловил СОВПАДЕНИЕ ДЛИНОЙ
-    В ПОЛТОРА МИЛЛИОНА ЗНАКОВ в base64-шуме шифротекста, то есть не ключ, а
-    статистическую неизбежность на файле такого размера. Зашифрованность
-    словаря (и то, что посторонний ключ его не откроет) проверяет
-    `test_c23_dictionary_is_really_encrypted`. Здесь -- строго открытые файлы,
+    ⛔ Дефекты 2/3 (правка): шифрованные артефакты из этого поиска исключены тем
+    же `_run_files` -- регексп `sk-[A-Za-z0-9_-]{20,}` ловил СОВПАДЕНИЕ ДЛИНОЙ
+    В ПОЛТОРА МИЛЛИОНА ЗНАКОВ в base64-шуме словаря и 3.1 совпадения на мегабайт
+    журнала вызовов, то есть не ключ, а статистическую неизбежность на файле
+    такого размера. Зашифрованность словаря и журнала вызовов (и то, что
+    посторонний ключ их не откроет) проверяют `test_c23_dictionary_is_really_encrypted`
+    и `test_c23_call_log_is_really_encrypted`. Здесь -- строго открытые файлы,
     и проверка обязана уметь падать: подсунутый в папку прогона файл с ключом
-    красит этот тест (проверено вручную, см. отчёт).
+    красит этот тест (проверено подсадкой, см. отчёт приёмки).
     """
     pattern = re.compile(rb"sk-[A-Za-z0-9_-]{20,}|SANIT_KEY|-----BEGIN")
     key_hex = os.environ["SANIT_KEY"].encode("ascii")
@@ -451,52 +564,3 @@ def test_c28_report_states_both_parts_of_the_hundred_percent(report):
     """«100 %» не считается по одной трети области: обе части названы в отчёте."""
     numbers = {r for row in report.reverse_rows for r in (row.expect, row.fact)}
     assert any(str(R.C28_REVERSIBLE_CELLS) in str(n) for n in numbers)
-
-
-# --- критерий 21: парный прогон из CLI --------------------------------------
-
-
-def test_twin_runs_are_bitwise_equal_and_leave_nothing_behind(
-    monkeypatch, config, admin_conn, ref_schema
-):
-    """⛔ Критерий 21 закрывается РЕАЛИЗАЦИЕЙ: `verify --twin` проводит два
-    прогона с одним seed на свежих копиях и сравнивает 16 хешей.
-
-    Проверяется здесь ровно то, чем владеет этот репозиторий: обвязка парного
-    прогона. Разброс самой языковой модели ей не подчиняется -- поставщик
-    подменён детерминированным двойником (тот же приём, что у
-    `test_cli_returns_hard_stop_code_on_network_failure`), и остаётся вопрос,
-    на который тест отвечает: одинаковы ли базы, когда одинаковы ответы.
-
-    ⛔ Второе утверждение теста не менее важно первого: замер не оставляет за
-    собой ни схем на сервере, ни файлов на диске. Второй словарь той же базы --
-    это ещё один деанонимизатор, и он обязан исчезнуть вместе с копией.
-    """
-    from sanitizer import cli, db
-    from helpers import fakes
-
-    twin = fakes.FakeModelProvider(seed=config.run.seed)
-    monkeypatch.setattr(
-        "sanitizer.providers.model.ModelProvider.supply",
-        lambda self, batch: twin.supply(batch),
-    )
-
-    hashes_a, hashes_b = cli._twin_runs(config)
-
-    assert hashes_a and hashes_b, "парный прогон вернул пустые своды хешей"
-    assert set(hashes_a) == set(hashes_b), "своды сняты с разных наборов таблиц"
-    assert len(hashes_a) == R.C8_SCHEMA["tables"], (
-        f"хешей {len(hashes_a)}, а базовых таблиц {R.C8_SCHEMA['tables']}")
-    mismatched = [t for t in sorted(hashes_a) if hashes_a[t] != hashes_b[t]]
-    assert not mismatched, f"прогоны разошлись по таблицам: {mismatched}"
-
-    left = [r["s"] for r in db.rows(
-        admin_conn,
-        "SELECT SCHEMA_NAME s FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE %s",
-        (f"{config.stand.work_schema}_twin_%",),
-    )]
-    assert not left, f"после замера на сервере остались схемы: {left}"
-
-    workdir = config.paths.dictionary.parent
-    strays = sorted(p.name for p in workdir.glob("twin_*"))
-    assert not strays, f"после замера на диске остались файлы: {strays}"

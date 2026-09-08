@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from decimal import Decimal
+from pathlib import Path
 
 from . import db
 from .dictionary import _norm
@@ -99,12 +102,6 @@ def _table_hashes(conn, schema: str) -> dict:
         )
         out[table] = db.rows(conn, sql)[0]["h"]
     return out
-
-
-#: ⛔ Публичное имя того же инструмента: парный прогон (критерий 21) считает хеши
-#: из CLI, и тянуть туда приватное имя чужого модуля -- значит делать вид, что
-#: связи нет. Связь есть, и она называется.
-table_hashes = _table_hashes
 
 
 def _key_expr(pk_cols: tuple) -> str:
@@ -301,3 +298,88 @@ def collision_baseline(schema: str, fmap, originals, *, conn) -> CollisionBaseli
                 ))
 
     return CollisionBaseline(cells=tuple(cells), working=working, forgiven=forgiven)
+
+
+# --- снимок на диск: сериализация на стыке процессов ---------------------------
+#
+# ⛔ Snapshot несёт datetime, Decimal и словарь с КОРТЕЖНЫМИ ключами
+# (secret_fingerprints) -- не JSON-совместимо "из коробки", поэтому здесь
+# явный, узкий кодек только под форму models.Snapshot, а не общий сериализатор.
+# ⛔ Кодек стоит РЯДОМ С `take_snapshot`, а не в `cli.py`: снимок «ДО» пишет
+# `prepare`, снимок «ПОСЛЕ» -- `runner.py`, и обоим нужен один и тот же кодек.
+
+
+def snapshot_to_dict(snap: Snapshot) -> dict:
+    return {
+        "phase": snap.phase,
+        "taken_at": snap.taken_at.isoformat(),
+        "rowcounts": dict(snap.rowcounts),
+        "total_rows": snap.total_rows,
+        "table_hashes": dict(snap.table_hashes),
+        "digest": snap.digest,
+        "schema_hash": snap.schema_hash,
+        "keys_hash": snap.keys_hash,
+        "dates_hash": snap.dates_hash,
+        "distributions_hash": snap.distributions_hash,
+        "last_update_hashes": dict(snap.last_update_hashes),
+        "distincts": dict(snap.distincts),
+        "nulls_and_empties": {k: list(v) for k, v in snap.nulls_and_empties.items()},
+        "money": [str(snap.money[0]), snap.money[1]],
+        "non_ascii": dict(snap.non_ascii),
+        "secret_fingerprints": [
+            [key[0], list(key[1]), key[2], value]
+            for key, value in snap.secret_fingerprints.items()
+        ],
+        "views": dict(snap.views),
+        "routines": list(snap.routines),
+    }
+
+
+def snapshot_from_dict(d: dict) -> Snapshot:
+    from datetime import datetime
+
+    return Snapshot(
+        phase=d["phase"],
+        taken_at=datetime.fromisoformat(d["taken_at"]),
+        rowcounts=dict(d["rowcounts"]),
+        total_rows=d["total_rows"],
+        table_hashes=dict(d["table_hashes"]),
+        digest=d["digest"],
+        schema_hash=d["schema_hash"],
+        keys_hash=d["keys_hash"],
+        dates_hash=d["dates_hash"],
+        distributions_hash=d["distributions_hash"],
+        last_update_hashes=dict(d["last_update_hashes"]),
+        distincts=dict(d["distincts"]),
+        nulls_and_empties={k: tuple(v) for k, v in d["nulls_and_empties"].items()},
+        money=(Decimal(d["money"][0]), d["money"][1]),
+        non_ascii=dict(d["non_ascii"]),
+        secret_fingerprints={
+            (row[0], tuple(row[1]), row[2]): row[3] for row in d["secret_fingerprints"]
+        },
+        views=dict(d["views"]),
+        routines=tuple(d["routines"]),
+    )
+
+
+def save_snapshot(path, snapshot: Snapshot) -> None:
+    """Снимок -- в JSON рядом с остальными артефактами прогона.
+
+    ⛔ Отказ записи НЕ роняет прогон -- ровно как у журнала вызовов
+    (`calls.py`): снимок «ПОСЛЕ» это доказательство и диагностика, а не
+    условие санитизации. Ронять из-за него прогон, который уже переписал
+    базу, значит менять готовый результат на его отсутствие. Молчать тоже
+    нельзя: причина уходит в поток ошибок ТИПОМ, без текста исключения
+    (в пути может стоять чужое имя, а в тексте -- что угодно).
+    """
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 -- причина названа типом, не текстом
+        import sys
+        print(f"снимок не записан ({type(exc).__name__}); прогон продолжается",
+              file=sys.stderr)

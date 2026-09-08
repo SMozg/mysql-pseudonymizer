@@ -130,7 +130,7 @@ class _AcceptanceReport(AcceptanceReport):
         lines.append(str(self.declaration_row))
         lines.append("")
 
-        lines.append("## 30 критериев приёмки")
+        lines.append("## 29 критериев приёмки")
         lines.append("| № | критерий | ожидание | факт | вердикт |")
         lines.append("|---|---|---|---|---|")
         for r in self.results:
@@ -225,16 +225,9 @@ class _AcceptanceReport(AcceptanceReport):
 
 
 class Verifier:
-    def __init__(self, passport, snapshot, baseline, fmap, dictionary, runlog, *, twin_runs=None,
+    def __init__(self, passport, snapshot, baseline, fmap, dictionary, runlog, *,
                  country_frame_margin=0.0):
-        """``twin_runs`` -- Р-89: результат ПАРНОГО прогона (два ``Runner`` с ОДНИМ
-        seed, каждый на свежей копии), нужный ровно критерию 21. Форма -- пара
-        отображений ``{table: hash}`` (то, что отдаёт ``_table_hashes``/инструмент Т,
-        по одному на каждый прогон пары) ЛИБО ``None``. Внутри одной приёмки
-        повторяемость не измерить -- это правда, а не отговорка (⛔ Р-72: отсутствие
-        замера не бывает зелёным, см. ``_c21``).
-
-        ``country_frame_margin`` -- Р-91: запас рамки критерия 27б, обязан совпадать
+        """``country_frame_margin`` -- Р-91: запас рамки критерия 27б, обязан совпадать
         с рамкой ГЕНЕРАЦИИ (``config.run.country_frame_margin``) -- иначе тесная рамка
         вырождается в точку для стран с единственным адресом (см. ``_c27``).
         ``Verifier`` не видит ни ``RunRule``, ни ``Config`` -- значение передаётся
@@ -245,7 +238,6 @@ class Verifier:
         self.fmap = fmap
         self.dictionary = dictionary
         self.runlog = runlog
-        self.twin_runs = twin_runs
         self.country_frame_margin = country_frame_margin
 
     # --- схемы и соединение ---------------------------------------------------
@@ -317,7 +309,7 @@ class Verifier:
 
         return GateResult(ok=ok, rows=tuple(rows))
 
-    # --- заход 2: приёмка, 30 критериев -----------------------------------------
+    # --- заход 2: приёмка, 29 критериев (номер 21 снят 08.09) -----------------------------------------
 
     def accept(self) -> AcceptanceReport:
         conn = self._connect()
@@ -334,7 +326,7 @@ class Verifier:
                 self._c09(conn), self._c10(conn, after), self._c11(conn, sanit_schema),
                 self._c12(after, conn), self._c13(conn), self._c14(conn), self._c15(after),
                 self._c16(conn), self._c17(after), self._c18(after), self._c19(conn, after),
-                self._c20(conn, sanit_schema), self._c21(), self._c22(conn), self._c23(),
+                self._c20(conn, sanit_schema), self._c22(conn), self._c23(),
                 self._c24(conn, sanit_schema), self._c25(after), self._c26(conn, sanit_schema),
                 self._c27(conn), self._c28(conn), self._c29(conn, sanit_schema),
                 self._c30(conn, sanit_schema),
@@ -466,7 +458,7 @@ class Verifier:
         sql = f"UPDATE `{schema}`.`{table}` SET {set_clause} WHERE {where}"
         db.execute(conn, sql, [rec.old_val] + list(pk))
 
-    # --- 30 критериев ------------------------------------------------------------
+    # --- 29 критериев (номер 21 снят 08.09) ------------------------------------------------------------
 
     def _c01(self, conn) -> CriterionResult:
         """Критерий 1 (Р-93, 2026-09-04): ТРИ поименованных замера, не один.
@@ -734,25 +726,6 @@ class Verifier:
                         "(самосогласованность БД со словарём -- эквивалент повтора без него)",
                     "0 расхождений БД/словаря", f"{n} расхождений", ok)
 
-    def _c21(self) -> CriterionResult:
-        """⛔ Р-72/Р-89: «не измерялось» НИКОГДА не 'P'. Без ``self.twin_runs`` -- F с
-        честным текстом. С ``twin_runs`` -- считаем по-настоящему: пара сводов «стол ->
-        хеш» с двух прогонов при одном seed, побитовое совпадение по каждой таблице."""
-        if self.twin_runs is None:
-            return _cr(21, "Повторяемость: два прогона с одним seed побитово совпадают",
-                        "16/16 хешей совпадают при парном прогоне",
-                        "не измерялось: парный прогон не проводился (нужны два Runner "
-                        "с одним seed на свежих копиях, self.twin_runs не передан)", False)
-        hashes_a, hashes_b = self.twin_runs
-        tables = sorted(set(hashes_a) | set(hashes_b))
-        mismatched = [t for t in tables if hashes_a.get(t) != hashes_b.get(t)]
-        ok = bool(tables) and not mismatched
-        fact = f"{len(tables) - len(mismatched)}/{len(tables)} хешей совпадают"
-        if mismatched:
-            fact += f"; расхождение: {mismatched}"
-        return _cr(21, "Повторяемость: два прогона с одним seed побитово совпадают",
-                    "16/16 хешей совпадают при парном прогоне", fact, ok)
-
     def _c22(self, conn) -> CriterionResult:
         """⛔ Сверка -- с ``passport.source_digest`` (КОНТРАКТ-ФОРМЫ §1 завёл поле ровно
         под этот критерий), а НЕ со снимком работы (``self.snapshot.digest`` -- это свод
@@ -833,10 +806,14 @@ class Verifier:
         тёзок по ключу. Стоит склейка одного -- кардинальности столбца, и потому
         публикуется числом. Разнообразие ЛИЧНОСТЕЙ гейтит критерий 12.
         📌 Гейт здесь один и он настоящий: склейка обязана быть ИСХОДОМ, а не
-        нормой -- каждая склеенная замена приходит последней ступенью лестницы
-        предпочтений, когда поставщик не дал ничего нового. Проверяется тем, что
-        число склеек не превышает числа выданных замен: величина, по которой видно
-        исчерпание пула, а не политику.
+        нормой. ⛔ Ревизия 08.09 сделала это правдой в коде, а не только словами:
+        занятость замены снова ОТКАЗ с повтором (`dictionary.py::_passes_hard`), и
+        склейка проходит ТОЛЬКО предохранителем последней попытки бюджета -- когда
+        поставщик за все 4 попытки не дал ничего нового. До ревизии склейку
+        принимала последняя ступень лестницы предпочтений БЕЗ единого повтора, и
+        критерий 12 краснел на двух колонках при зелёном 26.
+        Проверяется тем, что число склеек не превышает числа выданных замен:
+        величина, по которой видно исчерпание пула, а не политику.
         """
         rows = _rows(conn, Q.C26_INJECTIVE, sanit=sanit)
         glued = _rows(conn, Q.C26_GLUED_PAIRS, sanit=sanit)

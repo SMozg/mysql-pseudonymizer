@@ -54,7 +54,7 @@ from .errors import (
     StandNotStrict,
 )
 from .fieldmap import FieldMap
-from .metrics import take_snapshot
+from .metrics import save_snapshot, take_snapshot
 from .models import (
     DerivedRequest,
     LogEntry,
@@ -376,7 +376,15 @@ class Runner:
             })
             self.runlog.log("info", "counters", dict(self.runlog._sums))
 
-            cleaned_digest = take_snapshot(cfg.stand.work_schema, "after", conn=conn).digest
+            # ⛔ Снимок «ПОСЛЕ» СНИМАЕТСЯ ЗДЕСЬ И ЗДЕСЬ ЖЕ СОХРАНЯЕТСЯ (правка 08.09).
+            # `paths.snapshot_after` был объявлен в конфиге с самого начала, но
+            # файла не создавал НИКТО: `prepare` пишет «ДО», а «ПОСЛЕ» некому --
+            # объявленный путь оставался обещанием. Снимок и так снимается тут
+            # (нужен `cleaned_digest`), второй заход по базе не требуется:
+            # сохраняется ТОТ ЖЕ объект, а не пересчитанный позже другим кодом.
+            after = take_snapshot(cfg.stand.work_schema, "after", conn=conn)
+            save_snapshot(cfg.paths.snapshot_after, after)
+            cleaned_digest = after.digest
 
             refused_by_class: dict = {}
             for (cls, _cell, _current, _scope), r in zip(plan, results):
@@ -510,7 +518,8 @@ class Runner:
         тег для него ТОЧЕН. Заявлять «имя правдоподобно для страны клиента» нельзя --
         заявляем ровно то, что делаем: разнообразие берётся из страновой рамки.
         ⛔ При повторе имени берётся МИНИМАЛЬНЫЙ country_id: прогон обязан быть
-        воспроизводимым (критерий 21), а «первый попавшийся» зависит от порядка строк.
+        воспроизводимым в своей детерминированной части, а «первый попавшийся»
+        зависит от порядка строк.
         """
         wanted = {}
         for r in field_map.rules:

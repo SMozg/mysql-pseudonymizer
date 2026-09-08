@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
@@ -39,7 +38,8 @@ from .envfile import load_env_files
 from .dictionary import Dictionary
 from .errors import GateFailed, HardStop, IncompleteFieldMap, StandNotStrict
 from .fieldmap import FieldMap
-from .metrics import collision_baseline, table_hashes, take_snapshot
+from .metrics import (collision_baseline, save_snapshot, snapshot_from_dict,
+                      take_snapshot)
 from .models import RunRule, Snapshot
 from .runner import Runner, _RunLog, read_sanit_key
 from .verifier import Verifier
@@ -68,12 +68,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--config", required=True)
-    # ⛔ Критерий 21 (повторяемость) измеряется ТОЛЬКО парным прогоном: два
-    # Runner с одним seed на свежих копиях, у каждого свой словарь. Флаг
-    # отдельный, потому что это два настоящих прогона -- время и вызовы модели.
-    # Без флага критерий остаётся F с честным текстом «не измерялось» (Р-72).
-    p_verify.add_argument("--twin", action="store_true",
-                          help="провести парный прогон и измерить критерий 21")
 
     p_reverse = sub.add_parser("reverse")
     p_reverse.add_argument("--config", required=True)
@@ -95,72 +89,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# --- снимок «ДО» -- сериализация на стыке процессов (paths.snapshot_before) ----
+# --- снимок «ДО»/«ПОСЛЕ» -- чтение на стыке процессов --------------------------
 #
-# ⛔ Snapshot несёт datetime, Decimal и словарь с КОРТЕЖНЫМИ ключами
-# (secret_fingerprints) -- не JSON-совместимо "из коробки", поэтому здесь
-# явный, узкий кодек только под форму models.Snapshot, а не общий сериализатор.
-
-
-def _snapshot_to_dict(snap: Snapshot) -> dict:
-    return {
-        "phase": snap.phase,
-        "taken_at": snap.taken_at.isoformat(),
-        "rowcounts": dict(snap.rowcounts),
-        "total_rows": snap.total_rows,
-        "table_hashes": dict(snap.table_hashes),
-        "digest": snap.digest,
-        "schema_hash": snap.schema_hash,
-        "keys_hash": snap.keys_hash,
-        "dates_hash": snap.dates_hash,
-        "distributions_hash": snap.distributions_hash,
-        "last_update_hashes": dict(snap.last_update_hashes),
-        "distincts": dict(snap.distincts),
-        "nulls_and_empties": {k: list(v) for k, v in snap.nulls_and_empties.items()},
-        "money": [str(snap.money[0]), snap.money[1]],
-        "non_ascii": dict(snap.non_ascii),
-        "secret_fingerprints": [
-            [key[0], list(key[1]), key[2], value]
-            for key, value in snap.secret_fingerprints.items()
-        ],
-        "views": dict(snap.views),
-        "routines": list(snap.routines),
-    }
-
-
-def _snapshot_from_dict(d: dict) -> Snapshot:
-    from datetime import datetime
-
-    return Snapshot(
-        phase=d["phase"],
-        taken_at=datetime.fromisoformat(d["taken_at"]),
-        rowcounts=dict(d["rowcounts"]),
-        total_rows=d["total_rows"],
-        table_hashes=dict(d["table_hashes"]),
-        digest=d["digest"],
-        schema_hash=d["schema_hash"],
-        keys_hash=d["keys_hash"],
-        dates_hash=d["dates_hash"],
-        distributions_hash=d["distributions_hash"],
-        last_update_hashes=dict(d["last_update_hashes"]),
-        distincts=dict(d["distincts"]),
-        nulls_and_empties={k: tuple(v) for k, v in d["nulls_and_empties"].items()},
-        money=(Decimal(d["money"][0]), d["money"][1]),
-        non_ascii=dict(d["non_ascii"]),
-        secret_fingerprints={
-            (row[0], tuple(row[1]), row[2]): row[3] for row in d["secret_fingerprints"]
-        },
-        views=dict(d["views"]),
-        routines=tuple(d["routines"]),
-    )
-
-
-def _save_snapshot(path, snapshot: Snapshot) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_snapshot_to_dict(snapshot), ensure_ascii=False, indent=2), encoding="utf-8",
-    )
+# ⛔ Сам кодек (`snapshot_to_dict`/`snapshot_from_dict`/`save_snapshot`) живёт
+# в `metrics.py`, рядом с `take_snapshot`: писать снимок обязан ТОТ, КТО ЕГО
+# СНЯЛ, а «ПОСЛЕ» снимает `runner.py`, не CLI. Оставлять кодек здесь значило бы,
+# что раннер не может сохранить свой же снимок без импорта командной строки.
 
 
 def _load_snapshot(path) -> Snapshot:
@@ -174,7 +108,7 @@ def _load_snapshot(path) -> Snapshot:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HardStop(f"снимок «ДО» повреждён: {path} ({type(exc).__name__})") from None
-    return _snapshot_from_dict(data)
+    return snapshot_from_dict(data)
 
 
 # --- prepare: А + В + Б(заход ДО) -- копии стенда, карта полей, снимок «ДО» --
@@ -205,14 +139,14 @@ def _prepare(cfg: Config) -> int:
     finally:
         conn.close()
 
-    _save_snapshot(cfg.paths.snapshot_before, snapshot)
+    save_snapshot(cfg.paths.snapshot_before, snapshot)
     return EXIT_OK
 
 
 # --- verify/reverse/report: собрать Verifier отдельным процессом ------------
 
 
-def _build_verifier(cfg: Config, *, twin_runs=None) -> Verifier:
+def _build_verifier(cfg: Config) -> Verifier:
     field_map = FieldMap.load(cfg.paths.fieldmap)
     passp = stand.passport(cfg)
     snapshot = _load_snapshot(cfg.paths.snapshot_before)
@@ -238,75 +172,11 @@ def _build_verifier(cfg: Config, *, twin_runs=None) -> Verifier:
     # тот же `country_frame_margin`, каким пользуется `run` (см. `RunRule` выше в
     # `main()`), а не отдельное число.
     return Verifier(passp, snapshot, baseline, field_map, dictionary, runlog,
-                     twin_runs=twin_runs,
                      country_frame_margin=cfg.run.country_frame_margin)
 
 
-#: Метки двух прогонов пары. ⛔ Ровно два: критерий 21 сравнивает A с B.
-_TWIN_TAGS = ("a", "b")
-
-
-def _twin_config(cfg: Config, tag: str) -> Config:
-    """Config пары с ПОЛНОСТЬЮ своим набором имён -- схема и все артефакты.
-
-    ⛔ Отдельный словарь у каждого прогона -- не аккуратность, а суть замера.
-    Общий файл означает, что второй прогон не воспроизводит замену по seed, а
-    видит «уже применено» и переиспользует запись первого: хеши сойдутся не
-    потому, что прогон повторим, а потому, что это буквально одна и та же
-    запись. Проверка тогда не доказывает ничего.
-    """
-    workdir = cfg.paths.dictionary.parent
-    return cfg.with_overrides(
-        work_schema=f"{cfg.stand.work_schema}_twin_{tag}",
-        dictionary=workdir / f"twin_{tag}.enc",
-        runlog=workdir / f"twin_{tag}.runlog",
-        report=workdir / f"twin_{tag}.md",
-        snapshot_before=workdir / f"twin_{tag}_before.json",
-        snapshot_after=workdir / f"twin_{tag}_after.json",
-    )
-
-
-def _twin_runs(cfg: Config) -> tuple:
-    """Два прогона с ОДНИМ seed на свежих копиях -> пара сводов «таблица -> хеш».
-
-    ⛔ Копии и файлы сносятся в `finally` при любом исходе: замер не оставляет
-    за собой ни схем на сервере, ни словарей на диске -- второй словарь той же
-    базы это ещё один деанонимизатор.
-    """
-    conn = db.connect(cfg.stand.dsn(schema=None))
-    stand.session_init(conn)
-    made = []
-    hashes = []
-    try:
-        for tag in _TWIN_TAGS:
-            twin = _twin_config(cfg, tag)
-            schema = twin.stand.work_schema
-            made.append(twin)
-            print(f"парный прогон {tag}: копия {schema}", file=sys.stderr)
-            stand.make_copy(cfg.stand.source_schema, schema, conn=conn)
-            rule = RunRule(
-                seed=cfg.run.seed,
-                batch_size=cfg.run.batch_size,
-                retry_limit=cfg.run.retry_limit,
-                refusal_ratio=cfg.run.refusal_ratio,
-                country_frame_margin=cfg.run.country_frame_margin,
-                declaration="base",
-            )
-            Runner(rule, twin).run()
-            hashes.append(table_hashes(conn, schema))
-    finally:
-        for twin in made:
-            db.execute(conn, f"DROP DATABASE IF EXISTS `{twin.stand.work_schema}`")
-            for stray in (twin.paths.dictionary, twin.paths.runlog, twin.paths.report,
-                          twin.paths.snapshot_before, twin.paths.snapshot_after):
-                Path(stray).unlink(missing_ok=True)
-        conn.close()
-    return tuple(hashes)
-
-
-def _verify(cfg: Config, *, twin: bool = False) -> int:
-    pair = _twin_runs(cfg) if twin else None
-    verifier = _build_verifier(cfg, twin_runs=pair)
+def _verify(cfg: Config) -> int:
+    verifier = _build_verifier(cfg)
     report = verifier.accept()
     report.to_markdown(cfg.paths.report)
     # ⛔ Находка судьи 07.09: `verify` выходил кодом 1, не напечатав НИ СТРОКИ.
@@ -447,7 +317,7 @@ def main(argv: Sequence[str]) -> int:
         if args.command == "prepare":
             return _prepare(cfg)
         if args.command == "verify":
-            return _verify(cfg, twin=args.twin)
+            return _verify(cfg)
         if args.command == "reverse":
             return _reverse(cfg, args.into)
         if args.command == "report":

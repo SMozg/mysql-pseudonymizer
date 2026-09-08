@@ -30,9 +30,9 @@ right, what the run does to it.
 
 | row | what it holds BEFORE | what the run does |
 |---|---|---|
-| `customer` 1 | `MARY` · `SMITH` · `MARY.SMITH@sakilacustomer.org`, then `address_id`, `store_id`, `active`, `create_date` | the first name comes from the model; the surname from a permutation inside the database itself; `email` is rebuilt from the pair already issued. `address_id`, `store_id`, `active`, `create_date` stay byte for byte |
+| `customer` 1 | `MARY` · `SMITH` · `MARY.SMITH@sakilacustomer.org`, then `address_id`, `store_id`, `active`, `create_date` | first name and surname come from a random permutation inside the database itself, a separate one per class; `email` is rebuilt from the pair already issued. `address_id`, `store_id`, `active`, `create_date` stay byte for byte |
 | `staff` 1 | `Mike` · `Hillyer` · `Mike.Hillyer@sakilastaff.com` · `username` · `password` · `picture` | first name and surname take the same route as the customer's; `email` and `username` are rebuilt from them; `password` and `picture` are neutralised with a constant placeholder (it lives in `config/fieldmap.yaml`, field `constant`) |
-| `address` 1 | `47 MySakila Drive` · `Alberta` · empty `postal_code` and `phone` · `city_id` | street and district come from a deterministic generator: the values are invented, but shape and length hold and no network is needed. Empty stays empty, `NULL` never becomes a value, `city_id` is not shifted |
+| `address` 1 | `47 MySakila Drive` · `Alberta` · empty `postal_code` and `phone` · `city_id` | street and district come from a deterministic generator: the values are invented, but the shape holds (type, kind, non-emptiness) and no network is needed. ⛔ The length does NOT repeat the source one: for a street address and a district nothing checks it beyond the column limit; where the length must match exactly (postal code, phone) it matches on every row. Empty stays empty, `NULL` never becomes a value, `city_id` is not shifted |
 | `address` 5 | `1913 Hanoi Way` · `Nagasaki` · `postal_code` · `phone` · `location` | postal code and phone are rebuilt to the format of the source value, the coordinate is shifted inside its country box — no network for either |
 
 `film.title` is fiction, not personal data, and is left alone entirely — it doubles as the test that
@@ -63,15 +63,24 @@ of `config/config.yaml`.
 
 Want districts from the model? Edit the `КЗ-4` line in the config; the code stays untouched.
 
-**Why the surname has a strategy of its own.** Measurements hit a wall that neither temperature nor
-the number of variants nor a country tag could move: on this database the model proposes too few
-surnames that are not already in it, and returns the source value for the rest. On first names the
-same model does fine — which is why first names stayed with it. The permutation
-(`src/sanitizer/providers/shuffle.py`) holds diversity by construction: as many distinct surnames as
-there were, so many remain, and the length distribution matches to the letter. ⛔ It is a **circular
-shift within a group of values of equal length**, not an exchange of pairs: there are no fixed
-points by construction, and no mutual pairs arise. A value that finds no group of its own length
-goes to the model — so the model stays in play on this class too.
+**Why first names and surnames do not go through the model.** Measurements hit a ceiling that
+neither temperature, nor the wording of the request, nor hints about country or continent could
+move: a live model returns a limited number of DISTINCT values per answer, however many rows you
+ask it about, and two identical requests diverge by a multiple. For a city that does not matter —
+what is needed there is not cardinality but knowledge of the world: a real city of the same country.
+For a first name and a surname cardinality is exactly what is needed, and the model does not hold
+it. The permutation (`src/sanitizer/providers/shuffle.py`) holds it by construction: as many distinct
+values as there were, so many remain, and across the permuted part the length distribution matches
+the source one.
+⛔ It is a **random permutation within a group of values of equal length** — Sattolo's algorithm:
+exactly one cycle, `(n-1)!` arrangements, no fixed points by construction. The seed is taken not
+from the open `seed` but from an HMAC on the **dictionary encryption key**: whoever holds the key
+reverses the replacement, by dictionary or by permutation alike. First name, surname and city are
+permuted independently (the class goes into the seed), so the "first name + surname" pair of a real
+person is never reproduced systematically. Repeatability holds all the same: the same key and the
+same `seed` give the same permutation.
+A value that finds no group of its own length goes to the model — so the model stays in play here
+too. The measurements themselves are in `docs/ЗАМЕРЫ.md`.
 
 **Consistent across tables.** The dictionary is keyed by value class, not by column: namesakes in
 `customer` and `staff` get the same replacement. Relations, volume and diversity are measured by
@@ -97,13 +106,25 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 cp demo/sakila/.env.example demo/sakila/.env
+# ⛔ OPEN demo/sakila/.env AND FILL IT IN: with MYSQL_ROOT_PASSWORD and
+#    MYSQL_PASSWORD empty the server will not start. MYSQL_HOST_PORT lives
+#    there too: if 3307 is taken, change it here -- this is the only place.
 docker compose -f demo/sakila/docker-compose.yml up -d
+# ⛔ WAIT FOR healthy, or the next command runs into a closed port:
 docker compose -f demo/sakila/docker-compose.yml ps
 
 cp .env.example .env
 python -c "import secrets; print(secrets.token_hex(32))"
+# ⛔ OPEN .env AND FILL IN TWO LINES: the printed string goes into SANIT_KEY=,
+#    your model access key into SANIT_MODEL_KEY=. Write them INTO THE EMPTY
+#    LINES rather than appending to the end of the file: two lines with the
+#    same name confuse the reader. Without the model key the run stops at the
+#    pre-flight gate, naming it.
 
 python -m sanitizer prepare --config config/config.yaml
+# ⛔ Every command prints one line "прочитан …/.env: VARIABLE NAMES" per
+#    environment file picked up (values are never printed) and stays quiet
+#    to the end. Quiet is not hung.
 python -m sanitizer run     --config config/config.yaml --declare base
 python -m sanitizer verify  --config config/config.yaml
 python -m sanitizer reverse --config config/config.yaml --into sanit_restored
@@ -123,8 +144,9 @@ first command.
 **Keys.** The root `.env` (never committed) is about the tool itself. `SANIT_KEY` is the hex string
 from the command above; it encrypts the dictionary and the call journal. Write it into the empty
 `SANIT_KEY=` line — ⛔ do not append it to the end of the file: two lines with the same name confuse
-the reader. `SANIT_MODEL_KEY` goes into the same file: without it cities cannot be
-replaced, and on surnames the leftovers of the permutation stay unanswered. `SANIT_MODEL_BASE_URL`
+the reader. `SANIT_MODEL_KEY` goes into the same file: without it the leftovers of the
+permutations stay unanswered — cities of countries represented by a single city, and first names
+and surnames that found no group of their own length. `SANIT_MODEL_BASE_URL`
 is for a model behind an OpenAI-compatible gateway. The tool reads these **from the environment**;
 `.env` merely feeds it, and a variable set outside wins over the file. An unfilled variable stops the
 run at the pre-flight gate, naming it, instead of a connection refusal with no reason.
@@ -135,8 +157,16 @@ working copy and cleans that. The working schema name is `stand.work_schema` in 
 comparison baseline. `reverse --into sanit_restored` unfolds the replacements back into a third
 schema. Look for the result in the working schema, not in the source one.
 
-⛔ **`run` is silent**, and nearly all of its time is waiting for the model. There is exactly one
-sign of life, and it lives in another window:
+⛔ **Hand out the `sanit_work` schema ITSELF, not the whole server.** The source database and
+`sanit_ref` — a full copy of the BEFORE state, in the clear, needed by acceptance for its
+comparisons — stay on the same server right next to it. Dump the one schema for the handover
+(`mysqldump … sanit_work`), and drop `sanit_ref` once the comparison is done:
+`DROP SCHEMA sanit_ref`.
+
+⛔ **After the lines about the `.env` files read, `run` stays quiet to the end**, and on the demo
+stand it is short: nearly all of its time goes to the database, not to the network — the model only
+gets the leftovers of the permutations. There is exactly one sign of life, and it lives in another
+window:
 
 ```bash
 python -m sanitizer calls --config config/config.yaml --last 5
@@ -152,7 +182,9 @@ not spend the model again.
 
 **Requirements.** Python — the version is in `pyproject.toml` (`requires-python`). MySQL 8 with
 strict `sql_mode` (`STRICT_TRANS_TABLES`) and a `utf8mb4` connection, Docker Compose for the demo
-stand. Privileges: read on the source schema, full rights on the `sanit_*` schemas, the global
+stand. The `mysql` client — for the commands in "How to check it"; a clean machine usually has none,
+and then it comes from the stand container: `docker exec -it sanitizer-sakila-mysql mysql …`.
+Privileges: read on the source schema, full rights on the `sanit_*` schemas, the global
 `SHOW_ROUTINE` (without it the server returns a stored program's body as `NULL` rather than refusing)
 and `log_bin_trust_function_creators` when binary logging is on; root is not required. The demo stand
 grants all of it itself — `demo/sakila/initdb/03-grants.sql` and `demo/sakila/docker-compose.yml`.
@@ -172,18 +204,17 @@ Exit codes are part of the contract: **0** acceptance with no failures · **1** 
 | gate failed (code 3) | a variable, a privilege or a stand condition is missing | the stop names WHAT is missing — fill it in and repeat |
 | red acceptance (code 1) | the run finished but a criterion failed | `verify` prints the number and title of every failure; the detail is in `report/ОТЧЕТ-ПРИЕМКИ.md` |
 
-⛔ **A non-zero code at the end of the quick start is expected, not a breakage.** A plain `verify`
-without `--twin` always returns **1** today: criterion 21 (repeatability) stays red because no paired
-run happened and there is nothing to measure. "Not measured" is never painted green here — a red with
-a stated reason beats a green with no basis. To measure it for real, run `verify --twin`: it performs
-a paired run (same seed, fresh copies, a separate dictionary for each) and compares the results.
-Those are real runs: time and model calls.
+⛔ **Read the exit code, do not write it off as "that is how it is meant to be".**
+`verify` prints the NUMBERS and the NAMES of every failed criterion: read them before explaining
+code 1 by one known cause. There may be more than one red, and the second one will be real. Today
+on the demo stand the acceptance is green end to end: **29 criteria, 29 P, not a single F, exit
+code 0**. ⛔ That is a snapshot taken on the run date (2026-09-08), not a promise: the report
+`report/ОТЧЕТ-ПРИЕМКИ.md` is rebuilt by a command and re-checked on the spot.
 
-⛔ **And honestly about the second red.** Besides criterion 21, diversity (criterion 12) goes red on
-the demo stand: the deterministic providers for postal code and district occasionally hand the same
-value to two different cells, and a column loses one distinct value. That is NOT "expected" — it is
-a real failure of the tool's own requirement, published as a number in the report. Do not write off
-exit code 1 on one known cause: read what `verify` printed.
+📌 **Diversity (criterion 12) is green today.** The deterministic providers for postal code and
+district used to hand the same value to two different cells now and then, and a column lost one
+distinct value. The defect is fixed: no column lost a distinct value, and collisions among issued
+replacements are **0 out of 5030** (criterion 26, diagnostics).
 
 📌 **Retries are a cost, not a failure.** A live model sometimes returns the source value instead of
 a replacement; the filter rejects it and asks again. The retry count goes into the report as a line
@@ -196,12 +227,13 @@ Nothing below has to be taken on trust: every number is produced on the spot by 
 | what to check | how |
 |---|---|
 | how many tests the suite holds, and which | `pytest --collect-only -q` |
-| whether they pass against a live database | `pytest` — the tests run real sanitisation passes over copies of the database, not stubs, so allow time |
+| whether they pass against a live database | `pytest` — the tests run real sanitisation passes over copies of the database, not stubs, so allow time. ⛔ The model is replaced by a double in the tests: the suite spends NOT a single call and needs no model key |
 | whether they pass for everyone, not just for me | the `tests` badge above is a live GitHub Actions run, `.github/workflows/tests.yml`; the watchdog `.github/ci_gate.py` fails CI when zero tests were executed, when any test was skipped, and on any failure or error — it has its own tests, `tests/example/test_ci_gate.py` |
 | what the run cost in model terms — calls, tokens, time on the wire | `python -m sanitizer calls --config config/config.yaml` |
 | what the model actually answered on a given call | `python -m sanitizer calls --config config/config.yaml --last 5 --raw` (⛔ prints source values) |
 | how acceptance went | `python -m sanitizer verify --config config/config.yaml`, then `report/ОТЧЕТ-ПРИЕМКИ.md` |
 | rebuild the report (⛔ it RE-MEASURES every criterion — not a re-render) | `python -m sanitizer report --config config/config.yaml` |
+| look into the cleaned database with your own eyes | `mysql -h 127.0.0.1 -P <port> -u <user> -p --default-character-set=utf8mb4 -e "SELECT first_name, last_name, email FROM sanit_work.customer LIMIT 5"` — ⛔ the `--default-character-set=utf8mb4` flag is mandatory: without it the client hands back non-ASCII values (`A Coruña`) as garbage and an intact database looks broken. Next to it sit `sanit_ref` (the BEFORE snapshot) and `sanit_restored` after `reverse` |
 
 **What to look at in the acceptance report.** The first table lists every criterion with an
 "expected" column, a "fact" column and a `P`/`F` verdict: look for the `F` and read the fact text
@@ -227,12 +259,20 @@ production personal data that means a local model or a provider under a data agr
 gateway.
 
 **A permutation does not remove a value from the database; it only breaks its link to the row.**
-Surnames are shifted around a circle inside the database itself: every person now carries someone
+Surnames are swapped around inside the database itself: every person now carries someone
 else's surname, but THE SET of surnames in the database is unchanged. So the fact "a person with
 this surname is in here" survives, and the overlap between replacements and other rows' source
 values is TOTAL for this class — by construction, not by oversight. Acceptance publishes it as a
 number (criterion 1, measurement "в"), not as a refusal. Where the mere presence of a value is sensitive, the technique
 does not fit: you need an external surname dictionary, or a model with a large enough vocabulary.
+
+**A group of two values carries no secret: there is exactly one arrangement under ANY key.**
+A Sattolo permutation gives `(n-1)!` arrangements, and at `n = 2` that is one — the swap is forced,
+and it is reconstructed without the key. Cities are permuted inside their country, and in the Sakila
+demo database 19 countries are represented by exactly two cities: those 38 cities are recovered
+without the key, with certainty. That is geography, not personal data, so the behaviour is left as
+it is. For a first name and a surname the group is set by length, and there the groups are dense:
+the same attack recovered 0 rows out of 599.
 
 **The rule "a replacement must not occur among the source values" runs into the size of the
 database.** Not a hypothesis: the run stalled on the city class — the database has enough countries
@@ -261,8 +301,11 @@ that value. No permutation removes this: it changes WHO gets a value, not HOW OF
 class spans several columns: a name stored as `Mike` in one table gets a replacement in whatever case
 it has in another. Shape and length hold, readability does not.
 
-**Repeatability is not wired into machine acceptance.** Criterion 21 is red by default and turns
-green only under `verify --twin` — see "If the run stops".
+**Bit-for-bit repeatability of a run is neither promised nor checked by the acceptance.** The
+replacements come from a language model, and demanding that two runs match bit for bit argues with
+the tool's own requirement of plausible replacements: the repeatability criterion was withdrawn on
+2026-09-08. The deterministic part — the permutation, the generators, the batch split — reproduces
+from the same key and seed, and unit tests prove it on a deterministic provider double.
 
 **Verified on one database; a human classifies the columns.** The mechanics are general, but which
 column is personal data, which is public by role and which is neutral is a human decision, written

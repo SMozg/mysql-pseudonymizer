@@ -70,6 +70,16 @@ MODE_PREFER_NON_INTERSECTING = "prefer_non_intersecting"  # ОДНА ячейк�
 # кандидата (пересекающийся первым, чистый вторым): фильтр обязан выбрать
 # непересекающегося, даже когда он идёт не первым в списке.
 
+# ⛔ Ревизия 08.09: занятость замены -- СНОВА ОТКАЗ с повтором, склейка проходит
+# только предохранителем последней попытки. Эти два режима РАЗЛИЧАЮТ три политики,
+# а не только «до/после»: двойник даёт ДВУМ разным исходным значениям одного класса
+# ОДНУ И ТУ ЖЕ замену -- ровно та склейка, что просадила критерий 12 на замере 08.09
+# (`address.postal_code` 597->596, `address.district` 378->377).
+MODE_MERGE_ONCE = "merge_once"        # склейка ТОЛЬКО на первой попытке: повтор обязан
+# её снять (под Р-117 склейка принималась молча, без единого повтора).
+MODE_MERGE_FOREVER = "merge_forever"  # склейка на КАЖДОЙ попытке: предохранитель обязан
+# принять её на последней, а НЕ уронить прогон `RetriesExhausted`.
+
 
 def _word(seed: int, salt: str, length: int) -> str:
     """Детерминированное произносимое слово фиксированной длины."""
@@ -121,6 +131,17 @@ class FakeModelProvider:
     # равен приманке -- иначе приманка совпала бы со своим же исходным, и её
     # отказ был бы законным ПОД ОБОИМИ правилами, тест ничего бы не различил).
     _victim_key: Any = field(default=None, init=False, repr=False)
+    #: ⛔ MODE_MERGE_ONCE / MODE_MERGE_FOREVER: класс, на котором ставится склейка.
+    #: КЗ-4 -- это `address.district`, ОДНА ИЗ ДВУХ колонок замера 08.09 (вторая,
+    #: `address.postal_code`, класс КЗ-6, обслуживается боевым NonTextProvider и
+    #: двойнику не принадлежит). Берём ту, до которой двойник дотягивается.
+    merge_class: str = "КЗ-4"
+    #: Пара ячеек склейки, назначается лениво: первые две ячейки `merge_class` с
+    #: РАЗНЫМИ исходными значениями. Разными -- обязательно: у одинаковых охват
+    #: один (Р-45), они и так получат одну замену законно, и тест не различил бы
+    #: склейку от сквозной замены.
+    _merge_pair: list = field(default_factory=list, init=False, repr=False)
+    _merge_first_value: str = field(default="", init=False, repr=False)
 
     @property
     def victim_key(self) -> Any:
@@ -130,6 +151,15 @@ class FakeModelProvider:
         назначается лениво, при первом подходящем `item`).
         """
         return self._victim_key
+
+    @property
+    def merge_pair(self) -> tuple:
+        """Две ячейки, которым двойник выдал ОДНУ замену (режимы `MODE_MERGE_*`).
+
+        Пустой кортеж, пока пара не назначена; полная пара -- ровно два ключа
+        ``(table, pk, column)``.
+        """
+        return tuple(self._merge_pair)
 
     # --- протокол ----------------------------------------------------------
     def supply(self, batch) -> ProviderResponse:
@@ -167,6 +197,10 @@ class FakeModelProvider:
         first_try = item.attempt == 0
         if self.mode == MODE_ALWAYS_BAD:
             return ResponseItem(key=item.key, new_value=item.old_value)
+        if self.mode in (MODE_MERGE_ONCE, MODE_MERGE_FOREVER):
+            twin = self._twin_value(cls, item)
+            if twin is not None:
+                return ResponseItem(key=item.key, new_value=twin)
         if self.mode in (MODE_UNIVERSE_FOREVER, MODE_PREFER_NON_INTERSECTING):
             bait = self.universe_bait[0]
             # ⛔ Жертва назначается один раз, лениво: первый элемент, чей
@@ -209,6 +243,41 @@ class FakeModelProvider:
             return ResponseItem(key=item.key, new_value=item.old_value)
         return ResponseItem(key=item.key, new_value=self.value_for(
             cls, item.key, item.attempt, old_value=item.old_value))
+
+    def _twin_value(self, cls: str, item) -> Any:
+        """Замена ВТОРОЙ ячейки пары -- та же, что у первой. ``None`` -- отвечай как обычно.
+
+        ⛔ Пара назначается лениво и ровно одна на прогон: первые две ячейки
+        класса `merge_class` с РАЗНЫМИ исходными значениями. Первая ячейка
+        отвечает обычным путём (``None``), вторая получает ЕЁ значение на первой
+        попытке -- то есть ту самую замену, которая к этому моменту уже занята.
+        📌 Что этим различается:
+          `MODE_MERGE_ONCE`    -- склейка только на первой попытке. Занятость как
+             ОТКАЗ обязана дать повтор, и повтор развести значения (поставщик
+             солит хеш номером попытки). Под Р-117 повтора не было вовсе.
+          `MODE_MERGE_FOREVER` -- склейка на каждой попытке. Тут повтор бессилен,
+             и предохранитель последней попытки обязан принять склейку, а не
+             уронить прогон `RetriesExhausted`.
+        ⛔ Значение двойника берётся с ``attempt=0`` ВСЕГДА: иначе на повторе оно
+        поехало бы вместе с номером попытки и перестало быть занятым -- склейка
+        рассосалась бы сама, и `MODE_MERGE_FOREVER` не проверял бы ничего.
+        """
+        if cls != self.merge_class:
+            return None
+        pair = self._merge_pair
+        if item.key not in pair:
+            if len(pair) >= 2:
+                return None
+            if pair and item.old_value == self._merge_first_value:
+                return None            # то же исходное -- один охват, не склейка
+            if not pair:
+                self._merge_first_value = item.old_value
+            pair.append(item.key)
+        if item.key == pair[0]:
+            return None                # первая отвечает как обычно и занимает замену
+        if self.mode == MODE_MERGE_ONCE and item.attempt > 0:
+            return None                # повтор обязан развести -- отвечаем нормально
+        return self.value_for(cls, pair[0], 0, old_value=self._merge_first_value)
 
     def value_for(self, cls: str, key: Any, attempt: int = 0, old_value: str = "") -> str:
         """⛔ Функция КЛЮЧА, а не исходного значения -- см. шапку модуля.
