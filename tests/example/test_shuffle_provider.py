@@ -105,48 +105,80 @@ def test_without_a_spare_the_orphan_is_left_unanswered_not_silently_kept():
     assert len(answered) == 2
 
 
-# --- имя и фамилия крутятся в РАЗНЫЕ стороны (Р-126) ------------------------
+# --- перестановка на ключе, без неподвижных точек (Р-129) -------------------
+
+TEN = ("ABEL", "BOYD", "CARR", "DEAN", "EARL", "FORD", "GRAY", "HALL", "IVES", "JUDD")
 
 
-def test_name_and_surname_rotate_in_opposite_directions():
-    """⛔ Решение владельца 07.09. Крути оба класса одинаково -- и имя человека
-    вместе с его фамилией уедут к «соседу» ПО ОДНОМУ ПРАВИЛУ: пара настоящего
-    человека воспроизводилась бы не случайно, а системно. Обратное направление
-    снимает связку и стоит ноль.
-    """
-    values = ("SMITH", "JONES", "BROWN", "DAVIS", "MILLS")   # пять значений одной длины
-    surnames = _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-2")))
-    names = _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-1")))
-    assert surnames != names, "оба класса крутятся одинаково -- связка не снята"
-    assert set(names.values()) == set(surnames.values()) == set(values), (
-        "перестановка обязана оставаться внутри набора значений в обе стороны")
-
-
-def test_direction_does_nothing_when_the_shift_is_half_the_group():
-    """⛔ ЧЕСТНАЯ ОГОВОРКА, а не пропущенный случай: в группе ЧЁТНОГО размера при
-    сдвиге ровно в половину «вперёд» и «назад» -- одно и то же (idx+2 == idx-2 при
-    n=4). На таких группах обратное направление связку НЕ снимает.
-
-    📌 Оставлено как есть и записано тестом, а не «починено» подкруткой: группы
-    ровно такого размера редки, цена случая -- та же вероятность омонима, что
-    признана приемлемой, а молчаливая поправка сдвига сделала бы поведение
-    непредсказуемым для того, кто читает код.
-    """
-    values = ("SMITH", "JONES", "BROWN", "DAVIS")            # ровно четыре, сдвиг 2
-    assert (_first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-1")))
-            == _first(ShuffleProvider(1).supply(_batch(values, cls="КЗ-2"))))
-
-
-def test_names_keep_the_same_guarantees_as_surnames():
-    """Разнообразие точное и неподвижных точек нет -- у ОБОИХ классов."""
-    values = ("MARY", "JOHN", "LISA", "PAUL", "ANNA", "MARK")
-    b = _batch(values, cls="КЗ-1")
+def test_the_permutation_has_no_fixed_points():
+    """⛔ Алгоритм Саттоло даёт перестановку из ОДНОГО цикла: значение не может
+    достаться самому себе. Не «обычно не достаётся», а не может по построению."""
+    b = _batch(TEN, cls="КЗ-1")
     orig = {it.key: it.old_value for it in b.items}
-    got = _first(ShuffleProvider(2).supply(b))
-    assert len(set(got.values())) == len(values)
+    got = _first(ShuffleProvider(1).supply(b))
+    assert len(got) == len(TEN)
     for key, value in got.items():
         assert value != orig[key]
-        assert len(value) == len(orig[key])
+    assert len(set(got.values())) == len(TEN), "перестановка обязана быть взаимно однозначной"
+
+
+def test_name_and_surname_get_independent_permutations():
+    """📌 Требование владельца: перестановка нужна имени и фамилии ОТДЕЛЬНО и
+    НЕЗАВИСИМО. Класс входит в зерно, поэтому один и тот же набор значений
+    переставляется по-разному в разных классах."""
+    assert (_first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1")))
+            != _first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-2"))))
+
+
+def test_the_permutation_depends_on_the_secret_key(monkeypatch):
+    """⛔ Зерно берётся из HMAC на ключе шифрования словаря, а не из открытого seed.
+    Иначе перестановку восстанавливает любой, кто знает seed: набор значений в базе
+    не меняется, а сдвиг или тасовка по открытому числу воспроизводятся кем угодно.
+    """
+    monkeypatch.setenv("SANIT_KEY", "aa" * 32)
+    first = _first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1")))
+    monkeypatch.setenv("SANIT_KEY", "bb" * 32)
+    second = _first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1")))
+    assert first != second, "перестановка не зависит от ключа -- зерно взято не оттуда"
+
+
+def test_the_same_key_and_seed_give_the_same_permutation(monkeypatch):
+    """Критерий 21: два прогона с одним ключом и одним seed обязаны совпасть."""
+    monkeypatch.setenv("SANIT_KEY", "cc" * 32)
+    assert (_first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1", seed=42)))
+            == _first(ShuffleProvider(1).supply(_batch(TEN, cls="КЗ-1", seed=42))))
+
+
+def test_a_value_the_permutation_cannot_serve_goes_to_the_model():
+    """📌 Решение владельца 08.09: «если будет эхо, отдаём в ЛЛМ на замену».
+
+    ⛔ Неподвижных точек Саттоло не даёт, но эхо бывает ДРУГИМ: две разные величины
+    совпадают после нормализации (регистр, диакритика) -- и тогда замена читается
+    фильтром как «равна своему исходному». Такое значение уходит запасному
+    поставщику, а не остаётся без ответа.
+    """
+
+    class Spare:
+        name = "spare"
+        handles = frozenset({"КЗ-1"})
+
+        def __init__(self):
+            self.asked = []
+
+        def supply(self, batch):
+            from sanitizer.models import ProviderResponse, ResponseItem, Usage
+            self.asked = [it.old_value for it in batch.items]
+            return ProviderResponse(
+                items=tuple(ResponseItem(key=it.key, new_value=("ЗАПАСНОЕ",))
+                            for it in batch.items),
+                usage=Usage(calls=1, values=len(batch.items), refusals=0, tokens=None))
+
+    spare = Spare()
+    # «Мaria» и «MARIA» -- разные строки, но после нормализации одно и то же.
+    resp = ShuffleProvider(1, fallback=spare).supply(_batch(("MARIA", "Maria"), cls="КЗ-1"))
+    assert sorted(spare.asked) == ["MARIA", "Maria"], (
+        f"эхо после нормализации не ушло запасному: {spare.asked}")
+    assert len(resp.items) == 2, "строки обязаны получить ответ, а не пропасть"
 
 
 # --- город: группа СТРАНОВАЯ, а не по длине (Р-128) -------------------------

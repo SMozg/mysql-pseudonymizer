@@ -253,6 +253,14 @@ verifiable from outside. Every such column must carry a written ground in `confi
 an empty ground stops the run at the gate, and all of them are listed in a section of their own in
 the acceptance report.
 
+**A permutation preserves the frequency profile, and that is a separate path to re-identification.**
+If a value occurred exactly twice and it was the only such value, the replacement occurring twice is
+that value. No permutation removes this: it changes WHO gets a value, not HOW OFTEN it occurs.
+
+**The original letter case is not preserved.** A replacement comes from the same value class, and a
+class spans several columns: a name stored as `Mike` in one table gets a replacement in whatever case
+it has in another. Shape and length hold, readability does not.
+
 **Repeatability is not wired into machine acceptance.** Criterion 21 is red by default and turns
 green only under `verify --twin` — see "If the run stops".
 
